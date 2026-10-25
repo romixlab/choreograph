@@ -27,6 +27,14 @@
 //! a retry shows in the trace as a longer run phase and in [`SimStats`]. Jobs that come after a failed or
 //! cancelled job are cancelled when [`SimConfig::cancel_blocked`] is set.
 //!
+//! # Result cache
+//!
+//! With a [`SimConfig::cache`], a queued job whose inputs have a valid result in the cache is settled without
+//! running, as soon as it has arrived and its dependencies are done: it ends `Cached` (a pass) or `CachedFail`
+//! (a failure; its dependents are cancelled like those of a failed job). Every job that runs is recorded into
+//! the cache when it finishes: a pass, a failure, or a flaky verdict when it passed only after flaky attempts.
+//! Feeding one run's [`SimRun::cache`] into the next shows what a cache saves on a repeated workload.
+//!
 //! # Example
 //!
 //! An M/M/1 queue: Poisson arrivals at 40 per hour on one slot, exponential service with a mean of one minute.
@@ -72,9 +80,10 @@ use serde::{Deserialize, Serialize};
 pub use dist::{Dist, DistError};
 pub use workload::{Arrivals, Generated, PhaseDists, Template, Workload, WorkloadError};
 
+use crate::cache::{ResultCache, Verdict};
 use crate::model::{JobId, Model, Phase};
 use crate::plan::{Planner, WaitReason};
-use crate::state::{JobStatus, State, StateError};
+use crate::state::{JobStatus, Outcome, State, StateError};
 use crate::time::{Dur, Time};
 use crate::trace::{Event, Trace};
 
@@ -140,6 +149,10 @@ pub struct SimConfig {
     pub max_steps: u64,
     /// Free text appended to the trace header's source (the policy's name, a scenario).
     pub label: String,
+    /// A result cache to run against (`None`: every job runs). Queued jobs with a valid result are settled
+    /// without running ([`ResultCache::settle`]), and every finished run is recorded into it; the cache as it
+    /// is at the end comes back in [`SimRun::cache`].
+    pub cache: Option<ResultCache>,
 }
 
 impl Default for SimConfig {
@@ -155,6 +168,7 @@ impl Default for SimConfig {
             record_waits: true,
             max_steps: 100_000_000,
             label: String::new(),
+            cache: None,
         }
     }
 }
@@ -174,6 +188,8 @@ pub struct SimStats {
     pub retries: u64,
     /// Queued jobs cancelled because a dependency failed.
     pub cancelled: u64,
+    /// Jobs settled from the result cache without running (passes and failures).
+    pub cached: u64,
     /// The run stopped at [`SimConfig::until`] with events left.
     pub stopped_at_until: bool,
     /// Jobs not done at the end (the planner left them waiting with nothing left to happen, or `until`).
@@ -187,6 +203,8 @@ pub struct SimRun {
     /// The state at the end.
     pub state: State,
     pub stats: SimStats,
+    /// The result cache with this run's results recorded, when the run had one.
+    pub cache: Option<ResultCache>,
 }
 
 /// Why a run stopped with an error.
@@ -238,6 +256,9 @@ pub struct Sim<'a, P: Planner + ?Sized> {
     stats: SimStats,
     /// Some job ended without satisfying its dependents (for `cancel_blocked`).
     any_failed: bool,
+    cache: Option<ResultCache>,
+    /// Flaky attempts of each job's run, for the verdict recorded into the cache.
+    flaked: BTreeMap<JobId, u32>,
 }
 
 impl<'a, P: Planner + ?Sized> Sim<'a, P> {
@@ -268,6 +289,8 @@ impl<'a, P: Planner + ?Sized> Sim<'a, P> {
             wakes: BTreeSet::new(),
             stats: SimStats::default(),
             any_failed: false,
+            cache: cfg.cache.clone(),
+            flaked: BTreeMap::new(),
         };
         for j in model.job_ids() {
             let at = model.job(j).arrival.max(cfg.start);
@@ -312,6 +335,7 @@ impl<'a, P: Planner + ?Sized> Sim<'a, P> {
             .map_err(|error| SimError::State { at: t, error })?;
         loop {
             let mut arrived = false;
+            let mut ended = false;
             let mut failed_now = false;
             while let Some(Reverse(item)) = self.queue.peek().copied()
                 && item.t == t
@@ -327,7 +351,10 @@ impl<'a, P: Planner + ?Sized> Sim<'a, P> {
                         self.trace.push(t, Event::Arrived { job: item.job });
                         arrived = true;
                     }
-                    Ev::PhaseEnd { fail } => failed_now |= self.phase_end(t, item.job, fail)?,
+                    Ev::PhaseEnd { fail } => {
+                        ended = true;
+                        failed_now |= self.phase_end(t, item.job, fail)?;
+                    }
                     Ev::Wake => {
                         self.wakes.remove(&t);
                     }
@@ -336,6 +363,9 @@ impl<'a, P: Planner + ?Sized> Sim<'a, P> {
             self.any_failed |= failed_now;
             if self.cfg.cancel_blocked && (failed_now || (arrived && self.any_failed)) {
                 self.cancel_blocked(t)?;
+            }
+            if arrived || ended {
+                self.settle_cached(t)?;
             }
             self.count_step(t)?;
             self.stats.plans += 1;
@@ -400,6 +430,7 @@ impl<'a, P: Planner + ?Sized> Sim<'a, P> {
             trace: self.trace,
             state: self.state,
             stats: self.stats,
+            cache: self.cache,
         }
     }
 
@@ -475,6 +506,7 @@ impl<'a, P: Planner + ?Sized> Sim<'a, P> {
                     other => unreachable!("cleanup ended in {other:?}"),
                 };
                 self.trace.push(t, Event::Finished { job: j, outcome });
+                self.record_result(t, j, outcome);
                 return Ok(!outcome.satisfies_deps());
             }
         }
@@ -503,6 +535,7 @@ impl<'a, P: Planner + ?Sized> Sim<'a, P> {
                 return (total, true);
             }
             self.stats.flakes += 1;
+            *self.flaked.entry(j).or_default() += 1;
             if attempt == self.cfg.flake_retries {
                 self.stats.failed += 1;
                 return (total, true);
@@ -532,6 +565,58 @@ impl<'a, P: Planner + ?Sized> Sim<'a, P> {
     }
 
     /// Cancels queued jobs that wait on a failed or cancelled job, until none is left.
+    /// Settles queued jobs that have a valid cached result, until none is left (a settled job can let its
+    /// dependents settle too); cancels what a cached failure blocks.
+    fn settle_cached(&mut self, t: Time) -> Result<(), SimError> {
+        loop {
+            let Some(cache) = &self.cache else {
+                return Ok(());
+            };
+            let settled = cache
+                .settle(self.model, &mut self.state)
+                .map_err(|error| SimError::State { at: t, error })?;
+            if settled.is_empty() {
+                return Ok(());
+            }
+            let mut failed = false;
+            for s in settled {
+                self.waits.remove(&s.job);
+                self.stats.cached += 1;
+                failed |= !s.outcome.satisfies_deps();
+                self.trace.push(
+                    t,
+                    Event::Finished {
+                        job: s.job,
+                        outcome: s.outcome,
+                    },
+                );
+            }
+            self.any_failed |= failed;
+            if failed && self.cfg.cancel_blocked {
+                self.cancel_blocked(t)?;
+            }
+        }
+    }
+
+    /// Records the verdict of a job that ran into the cache: a pass, a pass after flaky attempts (flaky, never
+    /// reused), or a failure when every attempt failed. A cancelled job says nothing.
+    fn record_result(&mut self, t: Time, j: JobId, outcome: Outcome) {
+        let Some(cache) = &mut self.cache else {
+            return;
+        };
+        let flaked = self.flaked.get(&j).copied().unwrap_or(0);
+        let verdict = match outcome {
+            Outcome::Ok if flaked == 0 => Verdict::Pass,
+            Outcome::Ok => Verdict::Flaky {
+                failed: flaked,
+                runs: flaked + 1,
+            },
+            Outcome::Failed => Verdict::Fail,
+            Outcome::Cancelled | Outcome::Cached | Outcome::CachedFail => return,
+        };
+        cache.record(self.model.job(j), verdict, t, Vec::new());
+    }
+
     fn cancel_blocked(&mut self, t: Time) -> Result<(), SimError> {
         loop {
             let blocked: Vec<JobId> = self
@@ -574,7 +659,7 @@ mod tests {
     use super::*;
     use crate::model::{Estimate, Job, KindId, Labels, ModelBuilder, Unit};
     use crate::plan::{FirstFit, Plan, Start, find_assignment};
-    use crate::state::{Assignment, Outcome};
+    use crate::state::Assignment;
 
     fn slots(cap: u64) -> (ModelBuilder, KindId) {
         let mut b = ModelBuilder::new();
@@ -960,5 +1045,163 @@ mod tests {
         };
         let run = simulate(&m, &mut FirstFit, &cfg).unwrap();
         assert_eq!(times(&run.trace, finished)[&j], Time(3000));
+    }
+
+    /// a, b after a, c after b, each with inputs; d without inputs.
+    fn cached_model() -> (Model, [JobId; 4]) {
+        let (mut b, k) = slots(1);
+        let mut ids = Vec::new();
+        for (i, name) in ["a", "b", "c", "d"].into_iter().enumerate() {
+            let mut j = job(name, k, 0, 10, 100, 10);
+            if name != "d" {
+                j.inputs.insert("fw".into(), "1".into());
+            }
+            if let Some(prev) = ids.last()
+                && i < 3
+            {
+                j = j.after(*prev);
+            }
+            ids.push(b.job(j));
+        }
+        (b.build().unwrap(), [ids[0], ids[1], ids[2], ids[3]])
+    }
+
+    fn outcomes(run: &SimRun, m: &Model) -> Vec<Option<Outcome>> {
+        m.job_ids().map(|j| run.state.outcome(j)).collect()
+    }
+
+    #[test]
+    fn a_second_run_skips_cached_jobs() {
+        let (m, [a, b, c, d]) = cached_model();
+        let cfg = SimConfig {
+            cache: Some(ResultCache::default()),
+            ..SimConfig::default()
+        };
+        let first = simulate(&m, &mut FirstFit, &cfg).unwrap();
+        assert_eq!(first.stats.cached, 0);
+        let cache = first.cache.clone().unwrap();
+        assert_eq!(cache.len(), 3, "d has no inputs and is not stored");
+
+        let cfg2 = SimConfig {
+            cache: Some(cache),
+            ..SimConfig::default()
+        };
+        let second = simulate(&m, &mut FirstFit, &cfg2).unwrap();
+        assert_eq!(second.stats.cached, 3);
+        assert_eq!(
+            outcomes(&second, &m),
+            [
+                Some(Outcome::Cached),
+                Some(Outcome::Cached),
+                Some(Outcome::Cached),
+                Some(Outcome::Ok)
+            ]
+        );
+        let ran: Vec<JobId> = times(&second.trace, started).into_keys().collect();
+        assert_eq!(ran, [d]);
+        // the chain settles at once, in dependency order, at the start
+        let done = times(&second.trace, finished);
+        for j in [a, b, c] {
+            assert_eq!(done[&j], Time::ZERO);
+        }
+        // same inputs, same run
+        assert_eq!(simulate(&m, &mut FirstFit, &cfg2).unwrap(), second);
+    }
+
+    #[test]
+    fn a_changed_input_runs_again() {
+        let (m, [_, b, ..]) = cached_model();
+        let cfg = SimConfig {
+            cache: Some(ResultCache::default()),
+            ..SimConfig::default()
+        };
+        let cache = simulate(&m, &mut FirstFit, &cfg).unwrap().cache;
+        let mut jobs = m.jobs().to_vec();
+        jobs[b.index()].inputs.insert("fw".into(), "2".into());
+        let (mut builder, _) = slots(1);
+        for j in jobs {
+            builder.job(j);
+        }
+        let m2 = builder.build().unwrap();
+        let run = simulate(
+            &m2,
+            &mut FirstFit,
+            &SimConfig {
+                cache,
+                ..SimConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            outcomes(&run, &m2),
+            [
+                Some(Outcome::Cached),
+                Some(Outcome::Ok),
+                Some(Outcome::Cached),
+                Some(Outcome::Ok)
+            ],
+            "only b's inputs changed: c's key covers its own inputs, so it is still cached once b is done"
+        );
+    }
+
+    #[test]
+    fn a_cached_failure_cancels_its_dependents() {
+        let (m, [a, b, c, _]) = cached_model();
+        let mut cache = ResultCache::default();
+        cache.record(m.job(a), Verdict::Fail, Time::ZERO, vec![]);
+        let run = simulate(
+            &m,
+            &mut FirstFit,
+            &SimConfig {
+                cache: Some(cache),
+                ..SimConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(run.state.outcome(a), Some(Outcome::CachedFail));
+        assert_eq!(run.state.outcome(b), Some(Outcome::Cancelled));
+        assert_eq!(run.state.outcome(c), Some(Outcome::Cancelled));
+        assert_eq!(run.stats.cached, 1);
+        assert_eq!(run.stats.cancelled, 2);
+    }
+
+    #[test]
+    fn a_pass_after_flakes_is_recorded_flaky() {
+        let (mut b, k) = slots(1);
+        let mut j = job("t", k, 0, 0, 100, 0);
+        j.inputs.insert("fw".into(), "1".into());
+        j.sim.p_flake = 0.5;
+        let t = b.job(j);
+        let m = b.build().unwrap();
+        // the first seed whose run flakes once and then passes
+        let (seed, run) = (0..64)
+            .map(|seed| {
+                let cfg = SimConfig {
+                    seed,
+                    flake_retries: 3,
+                    cache: Some(ResultCache::default()),
+                    ..SimConfig::default()
+                };
+                (seed, simulate(&m, &mut FirstFit, &cfg).unwrap())
+            })
+            .find(|(_, r)| r.stats.flakes == 1 && r.state.outcome(t) == Some(Outcome::Ok))
+            .unwrap();
+        let cache = run.cache.unwrap();
+        let entry = cache.entries().next().unwrap();
+        assert_eq!(entry.verdict, Verdict::Flaky { failed: 1, runs: 2 });
+        // a flaky result is never reused: the next run runs it
+        let again = simulate(
+            &m,
+            &mut FirstFit,
+            &SimConfig {
+                seed,
+                flake_retries: 3,
+                cache: Some(cache),
+                ..SimConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(again.stats.cached, 0);
+        assert_eq!(again.state.outcome(t), Some(Outcome::Ok));
     }
 }

@@ -12,6 +12,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
   what changed) and valid apart; `ResultCache::settle` marks queued jobs with a valid result as done without
   running them (CACHE-1).
 - `Outcome::CachedFail` and `State::mark_cached_fail`: a job settled by a valid cached failure (CACHE-1).
+- `SimConfig::cache`: the simulator settles jobs with a valid cached result without running them and records
+  every run's verdict; `SimRun::cache` returns the cache, `SimStats::cached` counts the settled jobs (CACHE-1).
 
 ## [0.1.3] - 2026-10-25
 

@@ -4,7 +4,8 @@
 //! serial, fixture revision, instrument calibration id, a merged tree and its toolchain). The [`CacheKey`] is a
 //! SHA-256 hash of a canonical encoding of the job's name and those inputs, so the same job with the same
 //! inputs always has the same key, on every machine and in every version of this crate that keeps
-//! [`KEY_VERSION`].
+//! [`KEY_VERSION`]. Only a job's own inputs count: a job that uses what a job it comes after produced (a built
+//! image, a flashed firmware) names that product's hash among its inputs.
 //!
 //! A stored [`Entry`] is reused only while its validity holds: every [`Expiry`] recorded with it (a calibration
 //! that runs out) is in the future, and it is not older than [`CachePolicy::max_age`]. Only a [`Verdict::Pass`]
