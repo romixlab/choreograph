@@ -139,6 +139,17 @@ impl ListScheduler {
     /// The deadline urgency in [`PRIORITY_SCALE`] units, `None` without a due date or while the slack is at least
     /// the horizon.
     pub fn urgency(&self, model: &Model, now: Time, j: JobId) -> Option<i64> {
+        self.urgency_with(model, now, j, &|| self.deadline_class(model))
+    }
+
+    /// The urgency with the deadline class asked for only when needed (it scans the model's jobs).
+    fn urgency_with(
+        &self,
+        model: &Model,
+        now: Time,
+        j: JobId,
+        top: &dyn Fn() -> i32,
+    ) -> Option<i64> {
         let job = model.job(j);
         let due = job.due?;
         let slack = i128::from(due.ms()) - i128::from(now.ms()) - i128::from(remaining_p90(job));
@@ -147,26 +158,34 @@ impl ListScheduler {
             return None;
         }
         let into = (h - slack).min(h);
-        let top = i128::from(self.deadline_class(model)) * i128::from(PRIORITY_SCALE);
+        let top = i128::from(top()) * i128::from(PRIORITY_SCALE);
         Some(clamp_i64(top * into / h))
     }
 
     /// The effective priority π_j(t) in [`PRIORITY_SCALE`] units: the larger of the aged class and the deadline
     /// urgency.
     pub fn priority(&self, model: &Model, now: Time, j: JobId) -> i64 {
+        self.priority_with(model, now, j, &|| self.deadline_class(model))
+    }
+
+    fn priority_with(&self, model: &Model, now: Time, j: JobId, top: &dyn Fn() -> i32) -> i64 {
         let aged = self.aged_priority(model, now, j);
-        self.urgency(model, now, j).map_or(aged, |u| aged.max(u))
+        self.urgency_with(model, now, j, top)
+            .map_or(aged, |u| aged.max(u))
     }
 
     /// The queued jobs in dispatch order: effective priority, then shortest p50, then arrival, then id.
     pub fn order(&self, model: &Model, state: &State) -> Vec<JobId> {
         let now = state.now();
+        // Computed once per call, and only if some job is within its deadline horizon.
+        let top = std::cell::OnceCell::new();
+        let top = || *top.get_or_init(|| self.deadline_class(model));
         let mut keyed: Vec<_> = state
             .queued()
             .map(|j| {
                 let job = model.job(j);
                 (
-                    std::cmp::Reverse(self.priority(model, now, j)),
+                    std::cmp::Reverse(self.priority_with(model, now, j, &top)),
                     job.phases.total_p50(),
                     job.arrival,
                     j,
