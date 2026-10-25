@@ -7,7 +7,7 @@ default:
 # The tests. `just test`: all of them (test-all). `just test --changed`: only the workspace crates changed against
 # main and the crates that depend on them (needs tpm on PATH).
 test *flags:
-    if [ "{{flags}}" = "--changed" ]; then tpm test changed -- cargo nextest run --workspace --no-tests=pass; else {{just_executable()}} test-all {{flags}}; fi
+    if [ "{{flags}}" = "--changed" ]; then tpm test changed -- cargo nextest run --workspace; else {{just_executable()}} test-all {{flags}}; fi
 
 test-all *flags:
     cargo nextest run --workspace --all-features --no-tests=pass {{flags}}
