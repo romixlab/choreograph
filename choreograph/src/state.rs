@@ -4,7 +4,7 @@
 //! checked: a start that would go over a resource's capacity, skip a dependency or take a job twice is refused
 //! with a [`StateError`], and a batch of starts is applied all together or not at all (a group starts as one).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -108,6 +108,10 @@ pub struct State {
     holders: Vec<BTreeMap<JobId, u64>>,
     /// The current state index of each stateful resource.
     res_state: Vec<Option<usize>>,
+    /// Index of the queued jobs, so the planner's look at the queue does not scan every job.
+    queued: BTreeSet<JobId>,
+    /// Index of the running jobs.
+    running: BTreeSet<JobId>,
 }
 
 impl State {
@@ -123,6 +127,8 @@ impl State {
                 .iter()
                 .map(|r| r.states.as_ref().map(|s| s.initial))
                 .collect(),
+            queued: BTreeSet::new(),
+            running: BTreeSet::new(),
         }
     }
 
@@ -173,10 +179,10 @@ impl State {
 
     /// Jobs in a given condition, in id order.
     pub fn queued(&self) -> impl Iterator<Item = JobId> + '_ {
-        self.ids_where(|s| matches!(s, JobStatus::Queued))
+        self.queued.iter().copied()
     }
     pub fn running(&self) -> impl Iterator<Item = JobId> + '_ {
-        self.ids_where(|s| matches!(s, JobStatus::Running { .. }))
+        self.running.iter().copied()
     }
     pub fn pending(&self) -> impl Iterator<Item = JobId> + '_ {
         self.ids_where(|s| matches!(s, JobStatus::Pending))
@@ -213,6 +219,7 @@ impl State {
         match self.status[j.index()] {
             JobStatus::Pending => {
                 self.status[j.index()] = JobStatus::Queued;
+                self.queued.insert(j);
                 Ok(())
             }
             _ => Err(StateError::NotQueued(j)),
@@ -325,6 +332,8 @@ impl State {
             for (need, r) in model.job(*j).needs.iter().zip(&a.0) {
                 self.apply_state(model, need, *r);
             }
+            self.queued.remove(j);
+            self.running.insert(*j);
             self.status[j.index()] = JobStatus::Running {
                 assignment: a.clone(),
                 phase: Phase::Setup,
@@ -364,6 +373,7 @@ impl State {
             None => {
                 let ending = *ending;
                 self.release(model, j);
+                self.running.remove(&j);
                 self.status[j.index()] = JobStatus::Done {
                     at: now,
                     outcome: ending,
@@ -384,6 +394,7 @@ impl State {
     pub fn cancel(&mut self, j: JobId) -> Result<(), StateError> {
         match self.status[j.index()] {
             JobStatus::Queued | JobStatus::Pending => {
+                self.queued.remove(&j);
                 self.status[j.index()] = JobStatus::Done {
                     at: self.now,
                     outcome: Outcome::Cancelled,
@@ -398,6 +409,7 @@ impl State {
     pub fn mark_cached(&mut self, j: JobId) -> Result<(), StateError> {
         match self.status[j.index()] {
             JobStatus::Queued => {
+                self.queued.remove(&j);
                 self.status[j.index()] = JobStatus::Done {
                     at: self.now,
                     outcome: Outcome::Cached,
