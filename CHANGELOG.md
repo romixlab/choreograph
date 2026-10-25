@@ -5,6 +5,14 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Added
+
+- The result cache: results keyed by a hash of the job name and its inputs, validity windows and a max age,
+  pass and fail verdicts reused, flaky runs and infrastructure errors never; lookups tell untested, stale (with
+  what changed) and valid apart; `ResultCache::settle` marks queued jobs with a valid result as done without
+  running them (CACHE-1).
+- `Outcome::CachedFail` and `State::mark_cached_fail`: a job settled by a valid cached failure (CACHE-1).
+
 ## [0.1.3] - 2026-10-25
 
 ### Added

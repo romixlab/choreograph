@@ -21,8 +21,11 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
 - 📋 **EXEC-1 executor-state-machine**: leases with fencing tokens, saga cleanup from every state, an append-only
   journal and recovery to safe states, a watchdog per phase, interlocks the planner cannot bypass.
 - 📋 **EXEC-2 realtime-driver**: drive the executor state machine in real time (threads or an async runtime).
-- 📋 **CACHE-1 result-cache**: results keyed by a canonical hash of every input, validity windows, verdicts
-  (flaky and infrastructure errors are never valid results), untested vs stale.
+- 🚧 **CACHE-1 result-cache**: results keyed by a SHA-256 hash of a canonical encoding of the job name and its
+  inputs, validity windows (expiries such as a calibration, a max age), verdicts (pass and fail are results;
+  flaky runs invalidate, infrastructure errors are ignored), lookups that tell untested, stale (with the changed
+  inputs or the expiry named) and valid apart, and settling queued jobs with a valid result as `Cached` or
+  `CachedFail` without running them (`cache.rs`). Planned: the simulator skips cached jobs and records results.
 
 ## THEORY: formulas
 

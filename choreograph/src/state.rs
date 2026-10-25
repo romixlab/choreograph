@@ -26,8 +26,11 @@ pub enum Outcome {
     Failed,
     /// Cancelled before or during its run; cleanup ran if it had started.
     Cancelled,
-    /// Not run: a valid cached result was reused.
+    /// Not run: a valid cached result (a pass) was reused.
     Cached,
+    /// Not run: a valid cached result says it fails (a known-bad combination is not run again).
+    #[serde(rename = "cached_fail")]
+    CachedFail,
 }
 
 impl Outcome {
@@ -413,6 +416,21 @@ impl State {
                 self.status[j.index()] = JobStatus::Done {
                     at: self.now,
                     outcome: Outcome::Cached,
+                };
+                Ok(())
+            }
+            _ => Err(StateError::NotQueued(j)),
+        }
+    }
+
+    /// A queued job is settled by a valid cached failure: it is done, failed, without running.
+    pub fn mark_cached_fail(&mut self, j: JobId) -> Result<(), StateError> {
+        match self.status[j.index()] {
+            JobStatus::Queued => {
+                self.queued.remove(&j);
+                self.status[j.index()] = JobStatus::Done {
+                    at: self.now,
+                    outcome: Outcome::CachedFail,
                 };
                 Ok(())
             }

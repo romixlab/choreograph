@@ -11,6 +11,7 @@
 //! - [`model`]: nodes, resource kinds, resources, jobs, groups; [`ModelBuilder`] validates a model.
 //! - [`state`]: the runtime bookkeeping; [`State::start`] applies a batch of starts all or nothing.
 //! - [`plan`]: the [`Planner`] trait, [`Plan`], [`WaitReason`] and the [`FirstFit`] baseline.
+//! - [`cache`]: the result cache: a job with unchanged inputs and a valid result is not run again.
 //! - [`list`]: [`ListScheduler`], the main planner: priorities with aging and deadline urgency, placement,
 //!   backfilling with reservations, and a forward plan with ETAs.
 //! - [`policy`]: the list scheduler's settings, [`Policy`], loadable from TOML.
@@ -50,6 +51,7 @@
 //! state.start(&model, &plan.batch()).unwrap();
 //! ```
 
+pub mod cache;
 pub mod estimates;
 #[cfg(feature = "toml")]
 pub mod jobset;

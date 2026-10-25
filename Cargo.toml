@@ -12,6 +12,8 @@ rust-version = "1.88"
 [workspace.dependencies]
 choreograph = { path = "choreograph" }
 serde = { version = "1", features = ["derive"] }
+# default features off: no asm, pure Rust
+sha2 = { version = "0.11", default-features = false }
 thiserror = "2"
 toml = { version = "0.9", default-features = false, features = ["display", "parse", "serde", "std"] }
 clap = { version = "4", features = ["derive"] }
