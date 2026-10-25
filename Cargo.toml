@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["choreograph", "choreograph_cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/romixlab/choreograph"
+rust-version = "1.88"
+
+[workspace.dependencies]
+choreograph = { path = "choreograph" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
+clap = { version = "4", features = ["derive"] }
+
+[profile.dev]
+split-debuginfo = "unpacked"
+
+[profile.test]
+split-debuginfo = "unpacked"
+
+# just install: release, but incremental so a rebuild after a small change is quick
+[profile.deploy]
+inherits = "release"
+incremental = true

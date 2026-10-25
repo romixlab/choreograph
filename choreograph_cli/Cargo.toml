@@ -1,0 +1,16 @@
+[package]
+name = "choreograph_cli"
+description = "Command line for choreograph: check, plan and simulate job sets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "choreograph"
+path = "src/main.rs"
+
+[dependencies]
+choreograph.workspace = true
+clap.workspace = true

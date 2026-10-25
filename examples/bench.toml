@@ -1,0 +1,70 @@
+# A small test bench: one board on a fixture, a bench supply with states, a debug probe and a scope.
+# Six tests over two firmware images and three supply voltages; flashing takes 20 s, changing the voltage 1 s.
+
+[[node]]
+name = "bench"
+
+[[kind]]
+name = "probe"
+
+[[kind]]
+name = "supply"
+
+[[kind]]
+name = "scope"
+
+[[resource]]
+name = "probe"
+kind = "probe"
+node = "bench"
+states = ["none", "fw-a", "fw-b"]
+transitions = [{ to = "fw-a", dur = "20s" }, { to = "fw-b", dur = "20s" }]
+
+[[resource]]
+name = "supply"
+kind = "supply"
+node = "bench"
+states = ["off", "3V0", "3V3", "3V6"]
+safe = "off"
+transitions = [
+  { to = "off", dur = "100ms" },
+  { to = "3V0", dur = "1s" },
+  { to = "3V3", dur = "1s" },
+  { to = "3V6", dur = "1s" },
+]
+
+[[resource]]
+name = "scope"
+kind = "scope"
+node = "bench"
+
+[[job]]
+name = "a-3V0"
+needs = [{ kind = "probe", state = "fw-a" }, { kind = "supply", state = "3V0" }, { kind = "scope" }]
+run = "10s"
+
+[[job]]
+name = "b-3V0"
+needs = [{ kind = "probe", state = "fw-b" }, { kind = "supply", state = "3V0" }, { kind = "scope" }]
+run = "10s"
+
+[[job]]
+name = "a-3V3"
+needs = [{ kind = "probe", state = "fw-a" }, { kind = "supply", state = "3V3" }, { kind = "scope" }]
+run = "10s"
+
+[[job]]
+name = "b-3V3"
+needs = [{ kind = "probe", state = "fw-b" }, { kind = "supply", state = "3V3" }, { kind = "scope" }]
+run = "10s"
+
+[[job]]
+name = "a-3V6"
+needs = [{ kind = "probe", state = "fw-a" }, { kind = "supply", state = "3V6" }, { kind = "scope" }]
+run = "10s"
+
+[[job]]
+name = "b-3V6"
+needs = [{ kind = "probe", state = "fw-b" }, { kind = "supply", state = "3V6" }, { kind = "scope" }]
+run = "10s"
+p_fail = 0.1

@@ -1,0 +1,97 @@
+# A merge queue on two build machines. Each landing runs its gate (lint and tests) on a machine with enough RAM
+# and cores, then moves its repository's main branch forward, one landing at a time per repository.
+# Gate durations are lognormal-like: p50 and p90.
+
+[[node]]
+name = "build-1"
+
+[[node]]
+name = "build-2"
+
+[[kind]]
+name = "ram"
+unit = "bytes"
+
+[[kind]]
+name = "cores"
+unit = "millicores"
+
+[[kind]]
+name = "main"
+
+[[resource]]
+name = "build-1/ram"
+kind = "ram"
+node = "build-1"
+capacity = "24GiB"
+
+[[resource]]
+name = "build-1/cores"
+kind = "cores"
+node = "build-1"
+capacity = 24
+
+[[resource]]
+name = "build-2/ram"
+kind = "ram"
+node = "build-2"
+capacity = "16GiB"
+
+[[resource]]
+name = "build-2/cores"
+kind = "cores"
+node = "build-2"
+capacity = 10
+
+[[resource]]
+name = "repo-x/main"
+kind = "main"
+node = "build-1"
+
+[[resource]]
+name = "repo-y/main"
+kind = "main"
+node = "build-1"
+
+[[job]]
+name = "x1-gate"
+needs = [{ kind = "ram", amount = "11GiB", same_node = "g" }, { kind = "cores", amount = 6.8, same_node = "g" }]
+run = { p50 = "2m50s", p90 = "9m40s" }
+p_fail = 0.2
+
+[[job]]
+name = "x1-land"
+needs = [{ kind = "main", resource = "repo-x/main" }]
+run = "10s"
+after = ["x1-gate"]
+
+[[job]]
+name = "x2-gate"
+needs = [{ kind = "ram", amount = "11GiB", same_node = "g" }, { kind = "cores", amount = 6.8, same_node = "g" }]
+run = { p50 = "2m50s", p90 = "9m40s" }
+arrival = "1m"
+class = 1
+p_fail = 0.2
+
+[[job]]
+name = "x2-land"
+needs = [{ kind = "main", resource = "repo-x/main" }]
+run = "10s"
+after = ["x2-gate"]
+arrival = "1m"
+class = 1
+
+[[job]]
+name = "y1-gate"
+needs = [{ kind = "ram", amount = "14GiB", same_node = "g" }, { kind = "cores", amount = 8.1, same_node = "g" }]
+run = { p50 = "2m", p90 = "4m30s" }
+arrival = "2m"
+due = "20m"
+
+[[job]]
+name = "y1-land"
+needs = [{ kind = "main", resource = "repo-y/main" }]
+run = "10s"
+after = ["y1-gate"]
+arrival = "2m"
+due = "20m"
