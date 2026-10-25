@@ -48,6 +48,9 @@ Cargo workspace, edition 2024, one shared version.
   - `list.rs`: `ListScheduler`, the main planner: effective priority (class, aging, deadline urgency), placement
     scoring, EASY and conservative backfilling on a free-capacity profile, the forward plan (`forecast`).
   - `policy.rs`: `Policy`, the list scheduler's settings with defaults, loadable from TOML.
+  - `estimates.rs`: the `Estimates` trait and `Learner`, which learns an EWMA mean and streaming p50/p90/p99
+    per (job kind, phase, resource, node) from observed durations, blended with a prior per job kind and phase
+    for a cold start.
   - `trace.rs`: the event trace shared by the simulator, the executor journal and the GUI.
   - `theory.rs`: queueing and scheduling formulas (M/M/c, Erlang C, Kingman, Pollaczek–Khinchine, Cobham, ...)
     to compare measurements with predictions.

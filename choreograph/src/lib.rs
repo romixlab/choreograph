@@ -15,6 +15,7 @@
 //!   backfilling with reservations, and a forward plan with ETAs.
 //! - [`policy`]: the list scheduler's settings, [`Policy`], loadable from TOML.
 //! - [`sim`]: the discrete-event simulator: random durations, failures, arrival processes, seeded streams.
+//! - [`estimates`]: the [`Estimates`] trait and [`Learner`], which learns phase durations from history.
 //! - [`trace`]: the event trace shared by simulation, execution and playback.
 //! - [`theory`]: queueing formulas (Erlang C, Kingman, Pollaczek–Khinchine, Cobham, ...) for comparison.
 //! - [`jobset`] (feature `toml`): the TOML job-set format.
@@ -49,6 +50,7 @@
 //! state.start(&model, &plan.batch()).unwrap();
 //! ```
 
+pub mod estimates;
 #[cfg(feature = "toml")]
 pub mod jobset;
 pub mod list;
@@ -61,6 +63,7 @@ pub mod theory;
 pub mod time;
 pub mod trace;
 
+pub use estimates::{EstimateKey, EstimateSettings, Estimates, Learner, Quantiles};
 pub use list::{Eta, Forecast, ListScheduler, Span};
 pub use model::{
     Estimate, Job, JobId, Model, ModelBuilder, ModelError, Need, NodeId, Phase, ResourceId,

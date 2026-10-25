@@ -5,6 +5,12 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Added
+
+- Duration estimates learned from history: an EWMA mean and streaming p50/p90/p99 per (job kind, phase,
+  resource, node), blended with a prior per job kind and phase for a cold start, read through the new
+  `Estimates` trait (`EST-1`).
+
 ## [0.1.2] - 2026-10-25
 
 ### Added

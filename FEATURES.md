@@ -13,8 +13,11 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   a batch all or nothing (`state.rs`); the `Planner` trait, `Plan`, typed `WaitReason`s, the exact assignment
   search and the `FirstFit` baseline planner (`plan.rs`); the event trace format (`trace.rs`); the TOML job-set
   format (`jobset.rs`).
-- 📋 **EST-1 duration-estimates**: learn durations from history: EWMA mean, streaming quantiles (p50, p90, p99),
-  priors per kind for a cold start.
+- ✅ **EST-1 duration-estimates**: learns an EWMA mean and streaming p50/p90/p99 per (job kind, phase, resource,
+  node), blended with a prior per job kind and phase for a cold start, behind the `Estimates` trait
+  (`estimates.rs`). Settings for the EWMA weight, the quantile window and the prior weight. `PLAN-1`'s
+  `ListScheduler` reserves and backfills from each job's own static `Phases` estimates today, not yet from a
+  `Learner`; wiring it in is follow-up work for whichever piece needs learned estimates in the planner.
 - 📋 **EXEC-1 executor-state-machine**: leases with fencing tokens, saga cleanup from every state, an append-only
   journal and recovery to safe states, a watchdog per phase, interlocks the planner cannot bypass.
 - 📋 **EXEC-2 realtime-driver**: drive the executor state machine in real time (threads or an async runtime).
