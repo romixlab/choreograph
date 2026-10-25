@@ -5,6 +5,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-25
+
 ### Added
 
 - Duration estimates learned from history: an EWMA mean and streaming p50/p90/p99 per (job kind, phase,
