@@ -5,6 +5,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-25
+
 ### Added
 
 - The result cache: results keyed by a hash of the job name and its inputs, validity windows and a max age,
