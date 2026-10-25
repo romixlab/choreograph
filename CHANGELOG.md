@@ -5,6 +5,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-25
+
 ### Added
 
 - Discrete-event simulator `sim::simulate` driving any planner on simulated time, with phase duration models
