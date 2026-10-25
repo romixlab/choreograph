@@ -13,7 +13,7 @@ rust-version = "1.88"
 choreograph = { path = "choreograph" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
+toml = { version = "0.9", default-features = false, features = ["display", "parse", "serde", "std"] }
 clap = { version = "4", features = ["derive"] }
 
 [profile.dev]

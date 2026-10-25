@@ -45,6 +45,9 @@ Cargo workspace, edition 2024, one shared version.
     capacity checks (it refuses an over-capacity start).
   - `plan.rs`: the `Planner` trait, `Plan` (starts, reservations, wait reasons), `WaitReason`, and `Fifo`, the
     first-fit baseline planner.
+  - `list.rs`: `ListScheduler`, the main planner: effective priority (class, aging, deadline urgency), placement
+    scoring, EASY and conservative backfilling on a free-capacity profile, the forward plan (`forecast`).
+  - `policy.rs`: `Policy`, the list scheduler's settings with defaults, loadable from TOML.
   - `trace.rs`: the event trace shared by the simulator, the executor journal and the GUI.
   - `theory.rs`: queueing and scheduling formulas (M/M/c, Erlang C, Kingman, Pollaczek–Khinchine, Cobham, ...)
     to compare measurements with predictions.

@@ -5,6 +5,14 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Added
+
+- `ListScheduler`, the main planner: priorities with aging and deadline urgency, shortest-first ties, placement
+  by locality and dominant-resource fit, all-or-nothing starts for jobs and groups, EASY and conservative
+  backfilling with reservations from p90 estimates, wait reasons with estimated free times (PLAN-1).
+- `ListScheduler::forecast`: a forward plan with p50 and p90 ETAs for every queued and running job (PLAN-1).
+- `Policy`, the planner's settings with documented defaults, loadable from TOML (PLAN-1).
+
 ## [0.1.0] - 2026-10-25
 
 ### Added

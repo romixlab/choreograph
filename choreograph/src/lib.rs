@@ -11,6 +11,9 @@
 //! - [`model`]: nodes, resource kinds, resources, jobs, groups; [`ModelBuilder`] validates a model.
 //! - [`state`]: the runtime bookkeeping; [`State::start`] applies a batch of starts all or nothing.
 //! - [`plan`]: the [`Planner`] trait, [`Plan`], [`WaitReason`] and the [`FirstFit`] baseline.
+//! - [`list`]: [`ListScheduler`], the main planner: priorities with aging and deadline urgency, placement,
+//!   backfilling with reservations, and a forward plan with ETAs.
+//! - [`policy`]: the list scheduler's settings, [`Policy`], loadable from TOML.
 //! - [`trace`]: the event trace shared by simulation, execution and playback.
 //! - [`theory`]: queueing formulas (Erlang C, Kingman, Pollaczek–Khinchine, Cobham, ...) for comparison.
 //! - [`jobset`] (feature `toml`): the TOML job-set format.
@@ -47,17 +50,21 @@
 
 #[cfg(feature = "toml")]
 pub mod jobset;
+pub mod list;
 pub mod model;
 pub mod plan;
+pub mod policy;
 pub mod state;
 pub mod theory;
 pub mod time;
 pub mod trace;
 
+pub use list::{Eta, Forecast, ListScheduler, Span};
 pub use model::{
     Estimate, Job, JobId, Model, ModelBuilder, ModelError, Need, NodeId, Phase, ResourceId,
 };
 pub use plan::{FirstFit, Plan, Planner, Reservation, Start, WaitReason};
+pub use policy::{Backfill, Placement, Policy, Quantile};
 pub use state::{Assignment, JobStatus, Outcome, State, StateError};
 pub use time::{Dur, Time};
 pub use trace::{Event, Record, Trace};

@@ -29,10 +29,13 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
 
 ## PLAN: planners
 
-- 📋 **PLAN-1 list-scheduler**: priority rule (class, aging, deadline urgency from slack, shortest first on ties),
-  filter and score placement over several resource kinds, all-or-nothing starts, EASY and conservative
-  backfilling with reservations from p90 estimates, wait reasons with estimated free times, a forward plan with
-  ETAs, policy settings loadable from TOML.
+- ✅ **PLAN-1 list-scheduler**: `ListScheduler` (`list.rs`): effective priority = max(class + aging, deadline
+  urgency from the p90 slack over a horizon), ties by shorter p50, arrival, id; placement over the assignments
+  that fit (per node and without preference) by locality and dominant-resource best fit or least share;
+  all-or-nothing starts including groups, no head-of-line blocking; EASY (default) and conservative backfilling
+  on a free-capacity profile with reservations from p90 estimates; wait reasons with the estimated free time of
+  a held resource; `forecast`, a forward plan with p50 and p90 ETAs per queued and running job; `Policy`
+  (`policy.rs`) with documented defaults, loadable from TOML.
 - 📋 **PLAN-2 setup-aware**: stateful resources in planning: setup transition times in durations and scoring,
   grouping jobs that share a setup state.
 - 📋 **PLAN-3 merge-queue-policies**: speculative checks with a predicted failure probability per entry, batching
