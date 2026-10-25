@@ -5,6 +5,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-25
+
 ### Added
 
 - Cargo workspace with the `choreograph` library and the `choreograph_cli` binary; `just test`, `just lint`,
