@@ -48,9 +48,14 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
 
 ## SIM: simulation and metrics
 
-- 📋 **SIM-1 discrete-event-sim**: discrete-event simulation on the library's state and planners, duration models
-  (fixed, lognormal from p50/p90, empirical), failures and flakes, arrival processes (list, Poisson, renewal with a
-  chosen c_a², replay), seeded streams per purpose, trace output.
+- ✅ **SIM-1 discrete-event-sim**: discrete-event simulation on the library's state and any planner (`sim.rs`):
+  an event queue on simulated time with a stated order within an instant, duration models (fixed, exponential,
+  lognormal from p50/p90, gamma, hyperexponential, empirical; `sim/dist.rs`), run failures and flakes from the
+  job's sim hints with in-place retries, cancelling jobs behind a failed dependency, open workloads from job
+  templates with arrival processes (job list, Poisson, renewal with a chosen c_a², trace replay;
+  `sim/workload.rs`), seeded ChaCha8 streams per purpose and job (common random numbers across policies), trace
+  output. Long runs match M/M/1, M/M/c (Erlang C), M/D/1 and M/G/1 (Pollaczek–Khinchine) within stated
+  tolerances (`tests/sim_theory.rs`).
 - 📋 **SIM-2 trace-metrics**: utilisation, queue length, waiting and sojourn times per class, lateness and
   tardiness, makespan, Little's law self-check, and the matching theory predictions.
 

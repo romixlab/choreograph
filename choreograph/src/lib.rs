@@ -14,6 +14,7 @@
 //! - [`list`]: [`ListScheduler`], the main planner: priorities with aging and deadline urgency, placement,
 //!   backfilling with reservations, and a forward plan with ETAs.
 //! - [`policy`]: the list scheduler's settings, [`Policy`], loadable from TOML.
+//! - [`sim`]: the discrete-event simulator: random durations, failures, arrival processes, seeded streams.
 //! - [`trace`]: the event trace shared by simulation, execution and playback.
 //! - [`theory`]: queueing formulas (Erlang C, Kingman, Pollaczek–Khinchine, Cobham, ...) for comparison.
 //! - [`jobset`] (feature `toml`): the TOML job-set format.
@@ -54,6 +55,7 @@ pub mod list;
 pub mod model;
 pub mod plan;
 pub mod policy;
+pub mod sim;
 pub mod state;
 pub mod theory;
 pub mod time;
@@ -65,6 +67,7 @@ pub use model::{
 };
 pub use plan::{FirstFit, Plan, Planner, Reservation, Start, WaitReason};
 pub use policy::{Backfill, Placement, Policy, Quantile};
+pub use sim::{SimConfig, SimRun, simulate};
 pub use state::{Assignment, JobStatus, Outcome, State, StateError};
 pub use time::{Dur, Time};
 pub use trace::{Event, Record, Trace};

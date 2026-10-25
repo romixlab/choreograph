@@ -5,6 +5,18 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Added
+
+- Discrete-event simulator `sim::simulate` driving any planner on simulated time, with phase duration models
+  (fixed, exponential, lognormal from p50/p90, gamma, hyperexponential, empirical), run failures and flaky
+  retries, open workloads from job templates with Poisson, renewal (chosen c_a²) or replayed arrivals, and seeded
+  per-purpose random streams so policies compare on the same sampled world; writes a trace (SIM-1).
+
+### Changed
+
+- `State` keeps an index of queued and running jobs: `queued()` and `running()` no longer scan every job, so
+  long simulations stay fast (SIM-1).
+
 ## [0.1.1] - 2026-10-25
 
 ### Added
