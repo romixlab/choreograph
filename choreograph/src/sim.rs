@@ -764,6 +764,23 @@ mod tests {
         assert_eq!(a.stats.flakes, b.stats.flakes);
     }
 
+    /// The list scheduler runs a whole simulation too, deterministically.
+    #[test]
+    fn list_scheduler_drives_a_run() {
+        use crate::list::ListScheduler;
+        use crate::policy::Policy;
+        let m = random_model(200);
+        let cfg = SimConfig {
+            seed: 3,
+            flake_retries: 1,
+            ..SimConfig::default()
+        };
+        let a = simulate(&m, &mut ListScheduler::new(Policy::default()), &cfg).unwrap();
+        assert!(a.state.all_done());
+        let b = simulate(&m, &mut ListScheduler::new(Policy::default()), &cfg).unwrap();
+        assert_eq!(a, b);
+    }
+
     #[test]
     fn failures_cancel_dependents() {
         let (mut b, k) = slots(1);
