@@ -5,6 +5,10 @@
 //! name = "pc-a"
 //! labels = { arch = "x86_64" }
 //!
+//! [[node]]
+//! name = "pc-b"
+//! policy = { builds = "false" }   # only needs that name builds = "false" (node_labels or tolerate) land here
+//!
 //! [[kind]]
 //! name = "ram"
 //! unit = "bytes"          # count (default), bytes or millicores
@@ -98,6 +102,8 @@ struct NodeT {
     name: String,
     #[serde(default)]
     labels: Labels,
+    #[serde(default)]
+    policy: Labels,
 }
 
 #[derive(Deserialize)]
@@ -151,6 +157,8 @@ struct NeedT {
     labels: Labels,
     #[serde(default)]
     node_labels: Labels,
+    #[serde(default)]
+    tolerate: Labels,
     state: Option<String>,
     same_node: Option<String>,
 }
@@ -197,6 +205,7 @@ pub fn from_toml(text: &str) -> Result<Model, JobSetError> {
     let mut nodes = BTreeMap::new();
     for n in f.node {
         let id = b.node(n.name.clone(), n.labels);
+        b.policy(id, n.policy);
         nodes.insert(n.name, id);
     }
     let mut kinds = BTreeMap::new();
@@ -310,6 +319,7 @@ pub fn from_toml(text: &str) -> Result<Model, JobSetError> {
                     node,
                     labels: n.labels,
                     node_labels: n.node_labels,
+                    tolerate: n.tolerate,
                 },
                 state: n.state,
                 same_node: n.same_node,
@@ -502,6 +512,35 @@ group = "g"
             .as_ref()
             .unwrap();
         assert_eq!(sp.setup_time(0, 2), Some(Dur::secs(1)));
+    }
+
+    #[test]
+    fn node_policy_keeps_jobs_away_unless_asked() {
+        let set = r#"
+[[node]]
+name = "light"
+policy = { builds = "false" }
+[[kind]]
+name = "slot"
+[[resource]]
+name = "light/slot"
+kind = "slot"
+node = "light"
+[[job]]
+name = "lint"
+needs = [{ kind = "slot", node_labels = { builds = "false" } }]
+"#;
+        let m = from_toml(set).unwrap();
+        let light = m.node_by_name("light").unwrap();
+        assert_eq!(m.node(light).policy["builds"], "false");
+        let bad = set.replace(", node_labels = { builds = \"false\" }", "");
+        assert!(matches!(
+            from_toml(&bad),
+            Err(JobSetError::Model(ModelError::NoMatch { .. }))
+        ));
+        let tolerant = set.replace("node_labels = {", "tolerate = {");
+        let m = from_toml(&tolerant).unwrap();
+        assert_eq!(m.job(JobId(0)).needs[0].select.tolerate["builds"], "false");
     }
 
     #[test]

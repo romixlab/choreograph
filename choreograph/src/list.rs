@@ -457,7 +457,12 @@ impl Planner for ListScheduler {
         let q = self.policy.reserve_with;
         let mut plan = Plan::default();
         // `busy`: running jobs and this round's starts; `full`: also the reservations.
-        let mut busy = Profile::new(state.free_all(model));
+        let mut busy = Profile::new(
+            model
+                .resource_ids()
+                .map(|r| state.headroom(model, r))
+                .collect(),
+        );
         for j in state.running() {
             if let (Some(end), JobStatus::Running { assignment, .. }) =
                 (est_end(model, state, j, q), state.status(j))
@@ -599,10 +604,11 @@ struct Profile {
 }
 
 impl Profile {
-    fn new(free: Vec<u64>) -> Profile {
+    /// From the headroom of each resource now (negative where a capacity dropped below what is held).
+    fn new(free: Vec<i64>) -> Profile {
         let n = free.len();
         Profile {
-            free: free.into_iter().map(|f| f as i64).collect(),
+            free,
             deltas: vec![BTreeMap::new(); n],
         }
     }

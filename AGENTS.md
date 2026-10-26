@@ -43,6 +43,9 @@ Cargo workspace, edition 2024, one shared version.
     validation.
   - `state.rs`: the runtime bookkeeping the planner reads and drivers update: job status, who holds what,
     capacity checks (it refuses an over-capacity start).
+  - `live.rs`: `Live`, a model and its state that change at runtime: jobs submitted and compacted (ids
+    renumbered in order), capacities set from measurements, nodes added, up, down or lost, labels and policy
+    labels changed.
   - `plan.rs`: the `Planner` trait, `Plan` (starts, reservations, wait reasons), `WaitReason`, and `Fifo`, the
     first-fit baseline planner.
   - `list.rs`: `ListScheduler`, the main planner: effective priority (class, aging, deadline urgency), placement

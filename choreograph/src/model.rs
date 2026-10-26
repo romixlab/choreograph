@@ -71,7 +71,14 @@ pub enum Unit {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Node {
     pub name: String,
+    /// What the node is and has (`arch = "x86_64"`, a toolchain, a tool version); needs select on them.
     pub labels: Labels,
+    /// Policy labels that keep work away (`builds = "false"` on a node that hosts services): a need lands on
+    /// this node's resources only when its selector names every one of them with the same value, in
+    /// `node_labels` (it asks for such a node) or in `tolerate` (it accepts one), so a job that says nothing
+    /// never gets it.
+    #[serde(default, skip_serializing_if = "Labels::is_empty")]
+    pub policy: Labels,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -149,8 +156,12 @@ pub struct Selector {
     pub node: Option<NodeId>,
     /// Every label here must be on the resource with the same value.
     pub labels: Labels,
-    /// Every label here must be on the resource's node with the same value.
+    /// Every label here must be on the resource's node (as a label or a policy label) with the same value.
     pub node_labels: Labels,
+    /// Policy labels this need accepts without asking for them (see [`Node::policy`]): the need may land on a
+    /// node that has them, or on any other.
+    #[serde(default, skip_serializing_if = "Labels::is_empty")]
+    pub tolerate: Labels,
 }
 
 /// One thing a job needs: an amount of one resource of a kind, picked by a selector.
@@ -354,10 +365,14 @@ impl Model {
             .map(|i| KindId(i as u32))
     }
 
-    /// Whether resource `r` matches need `need` by kind, selector and capacity (ignoring what is held now).
+    /// Whether resource `r` matches need `need` by kind, selector, its node's policy labels and declared
+    /// capacity (ignoring what is held now, a measured capacity and whether the node is up: see [`State`]).
+    ///
+    /// [`State`]: crate::state::State
     pub fn matches(&self, need: &Need, r: ResourceId) -> bool {
         let res = self.resource(r);
         let sel = &need.select;
+        let node = self.node(res.node);
         res.kind == need.kind
             && res.capacity >= need.amount
             && sel.resource.is_none_or(|x| x == r)
@@ -366,7 +381,11 @@ impl Model {
             && sel
                 .node_labels
                 .iter()
-                .all(|(k, v)| self.node(res.node).labels.get(k) == Some(v))
+                .all(|(k, v)| node.labels.get(k) == Some(v) || node.policy.get(k) == Some(v))
+            && node
+                .policy
+                .iter()
+                .all(|(k, v)| sel.node_labels.get(k) == Some(v) || sel.tolerate.get(k) == Some(v))
             && need
                 .state
                 .as_ref()
@@ -378,6 +397,183 @@ impl Model {
         self.resource_ids()
             .filter(|r| self.matches(need, *r))
             .collect()
+    }
+}
+
+/// How [`Model::compact`] renumbered jobs and groups: the new id of each old one that was kept.
+///
+/// Ids stay dense and keep their order, so ties broken by id are broken the same way after a compaction.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Remap {
+    jobs: Vec<Option<JobId>>,
+    groups: Vec<Option<GroupId>>,
+}
+
+impl Remap {
+    /// The new id of an old job, `None` when it was removed.
+    pub fn job(&self, old: JobId) -> Option<JobId> {
+        self.jobs.get(old.index()).copied().flatten()
+    }
+
+    /// The new id of an old group, `None` when it was removed.
+    pub fn group(&self, old: GroupId) -> Option<GroupId> {
+        self.groups.get(old.index()).copied().flatten()
+    }
+
+    /// The jobs that were removed, by their old ids.
+    pub fn removed(&self) -> impl Iterator<Item = JobId> + '_ {
+        self.jobs
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.is_none())
+            .map(|(i, _)| JobId(i as u32))
+    }
+
+    /// Whether nothing was removed.
+    pub fn is_identity(&self) -> bool {
+        self.jobs.iter().all(Option::is_some) && self.groups.iter().all(Option::is_some)
+    }
+}
+
+/// Changes at runtime, each checked like [`ModelBuilder::build`]. They go through [`Live`], which keeps a
+/// [`State`] in step with the model.
+///
+/// [`Live`]: crate::live::Live
+/// [`State`]: crate::state::State
+impl Model {
+    pub(crate) fn add_node(&mut self, node: Node) -> Result<NodeId, ModelError> {
+        if self.nodes.iter().any(|n| n.name == node.name) {
+            return Err(ModelError::Duplicate {
+                what: "node",
+                name: node.name,
+            });
+        }
+        self.nodes.push(node);
+        Ok(NodeId(self.nodes.len() as u32 - 1))
+    }
+
+    pub(crate) fn add_resource(&mut self, r: Resource) -> Result<ResourceId, ModelError> {
+        if self.resources.iter().any(|x| x.name == r.name) {
+            return Err(ModelError::Duplicate {
+                what: "resource",
+                name: r.name,
+            });
+        }
+        check_resource(self, &r)?;
+        self.resources.push(r);
+        Ok(ResourceId(self.resources.len() as u32 - 1))
+    }
+
+    pub(crate) fn set_node_labels(&mut self, n: NodeId, labels: Labels) {
+        self.nodes[n.index()].labels = labels;
+    }
+
+    pub(crate) fn set_node_policy(&mut self, n: NodeId, policy: Labels) {
+        self.nodes[n.index()].policy = policy;
+    }
+
+    /// Adds jobs, as one group named `group` when given (their `group` fields are set to it). The jobs may come
+    /// after each other and after jobs already in the model. All or nothing: on an error the model is unchanged.
+    pub(crate) fn add_jobs(
+        &mut self,
+        jobs: Vec<Job>,
+        group: Option<String>,
+    ) -> Result<Vec<JobId>, ModelError> {
+        let first = self.jobs.len();
+        let groups = self.groups.len();
+        let ids: Vec<JobId> = (first..first + jobs.len())
+            .map(|i| JobId(i as u32))
+            .collect();
+        self.jobs.extend(jobs);
+        if let Some(name) = group {
+            let g = GroupId(groups as u32);
+            for j in &mut self.jobs[first..] {
+                j.group = Some(g);
+            }
+            self.groups.push(Group {
+                name,
+                members: ids.clone(),
+            });
+        }
+        let checked = self.check_added(first, groups);
+        if checked.is_err() {
+            self.jobs.truncate(first);
+            self.groups.truncate(groups);
+        }
+        checked.map(|()| ids)
+    }
+
+    fn check_added(&self, first: usize, groups: usize) -> Result<(), ModelError> {
+        let (old, new) = self.jobs.split_at(first);
+        for (i, j) in new.iter().enumerate() {
+            if old.iter().chain(&new[..i]).any(|o| o.name == j.name) {
+                return Err(ModelError::Duplicate {
+                    what: "job",
+                    name: j.name.clone(),
+                });
+            }
+        }
+        let (old, new) = self.groups.split_at(groups);
+        if let Some(g) = new.first()
+            && old.iter().any(|o| o.name == g.name)
+        {
+            return Err(ModelError::Duplicate {
+                what: "group",
+                name: g.name.clone(),
+            });
+        }
+        check_jobs(self, first)
+    }
+
+    /// Removes the jobs whose `keep` is false and the groups left without members, and renumbers the rest in
+    /// order. The caller makes sure no kept job comes after a removed one.
+    pub(crate) fn compact(&mut self, keep: &[bool]) -> Remap {
+        let mut next = 0u32;
+        let jobs: Vec<Option<JobId>> = keep
+            .iter()
+            .map(|k| {
+                k.then(|| {
+                    next += 1;
+                    JobId(next - 1)
+                })
+            })
+            .collect();
+        let mut next = 0u32;
+        let groups: Vec<Option<GroupId>> = self
+            .groups
+            .iter()
+            .map(|g| {
+                g.members.iter().any(|m| keep[m.index()]).then(|| {
+                    next += 1;
+                    GroupId(next - 1)
+                })
+            })
+            .collect();
+        let remap = Remap { jobs, groups };
+        let mut i = 0;
+        self.jobs.retain(|_| {
+            i += 1;
+            keep[i - 1]
+        });
+        for j in &mut self.jobs {
+            j.after.retain_mut(|a| match remap.job(*a) {
+                Some(n) => {
+                    *a = n;
+                    true
+                }
+                None => false,
+            });
+            j.group = j.group.and_then(|g| remap.group(g));
+        }
+        let mut i = 0;
+        self.groups.retain(|_| {
+            i += 1;
+            remap.groups[i - 1].is_some()
+        });
+        for g in &mut self.groups {
+            g.members = g.members.iter().filter_map(|m| remap.job(*m)).collect();
+        }
+        remap
     }
 }
 
@@ -427,8 +623,14 @@ impl ModelBuilder {
         self.nodes.push(Node {
             name: name.into(),
             labels,
+            policy: Labels::new(),
         });
         NodeId(self.nodes.len() as u32 - 1)
+    }
+
+    /// Sets a node's policy labels (see [`Node::policy`]).
+    pub fn policy(&mut self, node: NodeId, policy: Labels) {
+        self.nodes[node.index()].policy = policy;
     }
 
     pub fn kind(&mut self, name: impl Into<String>, unit: Unit) -> KindId {
@@ -520,51 +722,62 @@ fn validate(m: &Model) -> Result<(), ModelError> {
     dup("resource", m.resources.iter().map(|n| &n.name))?;
     dup("job", m.jobs.iter().map(|n| &n.name))?;
     dup("group", m.groups.iter().map(|n| &n.name))?;
-
-    let bad = |what, id: u32, len: usize| {
-        if id as usize >= len {
-            Err(ModelError::BadId { what, id })
-        } else {
-            Ok(())
-        }
-    };
     for r in &m.resources {
-        bad("kind", r.kind.0, m.kinds.len())?;
-        bad("node", r.node.0, m.nodes.len())?;
-        if r.capacity == 0 {
-            return Err(ModelError::ZeroCapacity {
+        check_resource(m, r)?;
+    }
+    check_jobs(m, 0)
+}
+
+fn bad(what: &'static str, id: u32, len: usize) -> Result<(), ModelError> {
+    if id as usize >= len {
+        Err(ModelError::BadId { what, id })
+    } else {
+        Ok(())
+    }
+}
+
+fn check_resource(m: &Model, r: &Resource) -> Result<(), ModelError> {
+    bad("kind", r.kind.0, m.kinds.len())?;
+    bad("node", r.node.0, m.nodes.len())?;
+    if r.capacity == 0 {
+        return Err(ModelError::ZeroCapacity {
+            resource: r.name.clone(),
+        });
+    }
+    if let Some(sp) = &r.states {
+        let n = sp.states.len();
+        let problem = if n == 0 {
+            Some("no states".to_string())
+        } else if sp.initial >= n || sp.safe >= n {
+            Some("initial or safe state out of range".to_string())
+        } else if sp
+            .transitions
+            .iter()
+            .any(|t| t.to >= n || t.from.is_some_and(|f| f >= n) || t.dur < Dur::ZERO)
+        {
+            Some("a transition refers to an unknown state or has a negative duration".into())
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            return Err(ModelError::BadStates {
                 resource: r.name.clone(),
+                problem,
             });
         }
-        if let Some(sp) = &r.states {
-            let n = sp.states.len();
-            let problem = if n == 0 {
-                Some("no states".to_string())
-            } else if sp.initial >= n || sp.safe >= n {
-                Some("initial or safe state out of range".to_string())
-            } else if sp
-                .transitions
-                .iter()
-                .any(|t| t.to >= n || t.from.is_some_and(|f| f >= n) || t.dur < Dur::ZERO)
-            {
-                Some("a transition refers to an unknown state or has a negative duration".into())
-            } else {
-                None
-            };
-            if let Some(problem) = problem {
-                return Err(ModelError::BadStates {
-                    resource: r.name.clone(),
-                    problem,
-                });
-            }
-        }
     }
+    Ok(())
+}
+
+/// Checks the jobs from index `first` on, and the groups that have a member among them. Jobs before `first` are
+/// known to be valid and can only depend on each other, so a cycle must pass through a new job.
+fn check_jobs(m: &Model, first: usize) -> Result<(), ModelError> {
     for g in &m.groups {
         for j in &g.members {
             bad("job", j.0, m.jobs.len())?;
         }
     }
-    for (ji, j) in m.jobs.iter().enumerate() {
+    for (ji, j) in m.jobs.iter().enumerate().skip(first) {
         for p in Phase::ALL {
             let e = j.phases.get(p);
             if e.p50 < Dur::ZERO || e.p90 < e.p50 {
@@ -623,6 +836,9 @@ fn validate(m: &Model) -> Result<(), ModelError> {
         }
     }
     for g in &m.groups {
+        if first > 0 && g.members.iter().all(|j| j.index() < first) {
+            continue;
+        }
         for j in &g.members {
             if m.jobs[j.index()]
                 .group
@@ -636,10 +852,11 @@ fn validate(m: &Model) -> Result<(), ModelError> {
             }
         }
     }
-    // Cycle check over `after` (iterative DFS with colours).
+    // Cycle check over `after` (iterative DFS with colours); jobs before `first` count as done.
     let n = m.jobs.len();
     let mut colour = vec![0u8; n]; // 0 new, 1 on stack, 2 done
-    for start in 0..n {
+    colour[..first].fill(2);
+    for start in first..n {
         if colour[start] != 0 {
             continue;
         }

@@ -3,12 +3,17 @@
 //! The planner reads a [`State`]; a driver (the simulator, later the executor) changes it. Every change is
 //! checked: a start that would go over a resource's capacity, skip a dependency or take a job twice is refused
 //! with a [`StateError`], and a batch of starts is applied all together or not at all (a group starts as one).
+//!
+//! The state also holds what is measured or reported from outside: a resource's current capacity
+//! ([`State::set_capacity`]) and whether a node is up ([`State::set_node_up`], [`State::node_lost`]). A capacity
+//! that drops below what is held, or a node that goes down, stops new starts there; the jobs running there keep
+//! what they hold.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{JobId, Model, Need, NodeId, Phase, ResourceId};
+use crate::model::{JobId, Model, Need, NodeId, Phase, Remap, ResourceId};
 use crate::time::Time;
 
 /// Which resource satisfies each of a job's needs, in the order of `Job::needs`.
@@ -115,6 +120,21 @@ pub struct State {
     queued: BTreeSet<JobId>,
     /// Index of the running jobs.
     running: BTreeSet<JobId>,
+    /// The measured capacity of each resource, `None` while it is the declared one.
+    measured: Vec<Option<u64>>,
+    /// Whether each node is up.
+    up: Vec<bool>,
+}
+
+/// What happens to the jobs running on a node that is lost.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LostJobs {
+    /// They go back to the queue and start again elsewhere (a build, a test run).
+    #[default]
+    Requeue,
+    /// They end `Failed` (work that must not run twice without a look).
+    Fail,
 }
 
 impl State {
@@ -132,6 +152,62 @@ impl State {
                 .collect(),
             queued: BTreeSet::new(),
             running: BTreeSet::new(),
+            measured: vec![None; model.resources().len()],
+            up: vec![true; model.nodes().len()],
+        }
+    }
+
+    /// Makes room for the jobs, resources and nodes added to the model since: new jobs are `Pending`, new
+    /// resources free in their initial state, new nodes up.
+    pub(crate) fn grow(&mut self, model: &Model) {
+        self.status.resize(model.jobs().len(), JobStatus::Pending);
+        let rs = &model.resources()[self.used.len()..];
+        self.res_state
+            .extend(rs.iter().map(|r| r.states.as_ref().map(|s| s.initial)));
+        let n = model.resources().len();
+        self.used.resize(n, 0);
+        self.holders.resize(n, BTreeMap::new());
+        self.measured.resize(n, None);
+        self.up.resize(model.nodes().len(), true);
+    }
+
+    /// Which jobs a compaction keeps: every job not done at or before `done_by`, and every job a kept job comes
+    /// after (its outcome still decides whether that one may run), in job id order.
+    pub fn keep_after_compaction(&self, model: &Model, done_by: Time) -> Vec<bool> {
+        let mut keep: Vec<bool> = self
+            .status
+            .iter()
+            .map(|s| !matches!(s, JobStatus::Done { at, .. } if *at <= done_by))
+            .collect();
+        let mut work: Vec<JobId> = model.job_ids().filter(|j| keep[j.index()]).collect();
+        while let Some(j) = work.pop() {
+            for d in &model.job(j).after {
+                if !keep[d.index()] {
+                    keep[d.index()] = true;
+                    work.push(*d);
+                }
+            }
+        }
+        keep
+    }
+
+    /// Follows a compaction of the model: drops the removed jobs (all done) and renumbers the rest.
+    pub(crate) fn remap(&mut self, remap: &Remap) {
+        let mut i = 0;
+        self.status.retain(|_| {
+            i += 1;
+            remap.job(JobId(i as u32 - 1)).is_some()
+        });
+        let map = |set: &BTreeSet<JobId>| -> BTreeSet<JobId> {
+            set.iter().filter_map(|j| remap.job(*j)).collect()
+        };
+        self.queued = map(&self.queued);
+        self.running = map(&self.running);
+        for h in &mut self.holders {
+            *h = h
+                .iter()
+                .filter_map(|(j, a)| remap.job(*j).map(|n| (n, *a)))
+                .collect();
         }
     }
 
@@ -160,14 +236,97 @@ impl State {
         self.used[r.index()]
     }
 
-    /// Amount of a resource free now.
+    /// The capacity of a resource now: 0 while its node is down, else the measured one if set, else the
+    /// declared one.
+    pub fn capacity(&self, model: &Model, r: ResourceId) -> u64 {
+        let res = model.resource(r);
+        if !self.up[res.node.index()] {
+            return 0;
+        }
+        self.measured[r.index()].unwrap_or(res.capacity)
+    }
+
+    /// The measured capacity of a resource, `None` while the declared one counts.
+    pub fn measured(&self, r: ResourceId) -> Option<u64> {
+        self.measured[r.index()]
+    }
+
+    /// Whether a node is up.
+    pub fn node_up(&self, n: NodeId) -> bool {
+        self.up[n.index()]
+    }
+
+    /// Amount of a resource free now: its capacity now less what is held, 0 when more is held than that.
     pub fn free(&self, model: &Model, r: ResourceId) -> u64 {
-        model.resource(r).capacity - self.used[r.index()]
+        self.capacity(model, r).saturating_sub(self.used[r.index()])
     }
 
     /// Free amount of every resource, indexed by resource id.
     pub fn free_all(&self, model: &Model) -> Vec<u64> {
         model.resource_ids().map(|r| self.free(model, r)).collect()
+    }
+
+    /// Capacity now less what is held, negative when a capacity dropped below what running jobs hold: the
+    /// amount stays short until enough of them end.
+    pub fn headroom(&self, model: &Model, r: ResourceId) -> i64 {
+        let c = i128::from(self.capacity(model, r)) - i128::from(self.used[r.index()]);
+        c.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+    }
+
+    /// Sets the capacity of a resource as measured from outside (`None`: back to the declared one). It may drop
+    /// below what is held: nothing new starts on the resource until enough is free again, and the jobs that
+    /// hold it keep running. Matching still uses the declared capacity, so a need above the measured capacity
+    /// waits instead of being refused.
+    pub fn set_capacity(&mut self, r: ResourceId, capacity: Option<u64>) {
+        self.measured[r.index()] = capacity;
+    }
+
+    /// Marks a node up or down. Nothing new starts on a node that is down; jobs running there keep running
+    /// and release their resources as usual (a drain). For a node that is gone with its jobs, see
+    /// [`State::node_lost`].
+    pub fn set_node_up(&mut self, n: NodeId, up: bool) {
+        self.up[n.index()] = up;
+    }
+
+    /// A node is lost with the jobs running on it: it goes down, and every running job that holds a resource
+    /// on it releases all it holds (cleanup cannot run there) and is requeued or ends `Failed`, as `then`
+    /// says. A job that was already ending failed or cancelled ends so. Returns the affected jobs in id
+    /// order.
+    pub fn node_lost(&mut self, model: &Model, n: NodeId, then: LostJobs) -> Vec<JobId> {
+        self.up[n.index()] = false;
+        let hit: Vec<JobId> = self
+            .running
+            .iter()
+            .copied()
+            .filter(|j| match &self.status[j.index()] {
+                JobStatus::Running { assignment, .. } => {
+                    assignment.0.iter().any(|r| model.resource(*r).node == n)
+                }
+                _ => false,
+            })
+            .collect();
+        for &j in &hit {
+            let JobStatus::Running { ending, .. } = self.status[j.index()] else {
+                continue;
+            };
+            self.release(model, j);
+            self.running.remove(&j);
+            self.status[j.index()] = match (ending, then) {
+                (Outcome::Ok, LostJobs::Requeue) => {
+                    self.queued.insert(j);
+                    JobStatus::Queued
+                }
+                (Outcome::Ok, LostJobs::Fail) => JobStatus::Done {
+                    at: self.now,
+                    outcome: Outcome::Failed,
+                },
+                (e, _) => JobStatus::Done {
+                    at: self.now,
+                    outcome: e,
+                },
+            };
+        }
+        hit
     }
 
     /// Who holds a resource and how much, in job id order.

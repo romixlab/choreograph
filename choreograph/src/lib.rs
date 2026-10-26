@@ -10,6 +10,8 @@
 //!
 //! - [`model`]: nodes, resource kinds, resources, jobs, groups; [`ModelBuilder`] validates a model.
 //! - [`state`]: the runtime bookkeeping; [`State::start`] applies a batch of starts all or nothing.
+//! - [`live`]: [`Live`], a model and state that change at runtime: jobs submitted and compacted, capacities
+//!   measured, nodes up, down or lost, labels changed.
 //! - [`plan`]: the [`Planner`] trait, [`Plan`], [`WaitReason`] and the [`FirstFit`] baseline.
 //! - [`cache`]: the result cache: a job with unchanged inputs and a valid result is not run again.
 //! - [`list`]: [`ListScheduler`], the main planner: priorities with aging and deadline urgency, placement,
@@ -56,6 +58,7 @@ pub mod estimates;
 #[cfg(feature = "toml")]
 pub mod jobset;
 pub mod list;
+pub mod live;
 pub mod model;
 pub mod plan;
 pub mod policy;
@@ -67,12 +70,13 @@ pub mod trace;
 
 pub use estimates::{EstimateKey, EstimateSettings, Estimates, Learner, Quantiles};
 pub use list::{Eta, Forecast, ListScheduler, Span};
+pub use live::Live;
 pub use model::{
-    Estimate, Job, JobId, Model, ModelBuilder, ModelError, Need, NodeId, Phase, ResourceId,
+    Estimate, Job, JobId, Model, ModelBuilder, ModelError, Need, NodeId, Phase, Remap, ResourceId,
 };
 pub use plan::{FirstFit, Plan, Planner, Reservation, Start, WaitReason};
 pub use policy::{Backfill, Placement, Policy, Quantile};
 pub use sim::{SimConfig, SimRun, simulate};
-pub use state::{Assignment, JobStatus, Outcome, State, StateError};
+pub use state::{Assignment, JobStatus, LostJobs, Outcome, State, StateError};
 pub use time::{Dur, Time};
 pub use trace::{Event, Record, Trace};

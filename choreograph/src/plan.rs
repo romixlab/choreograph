@@ -58,6 +58,8 @@ pub enum WaitReason {
         amount: u64,
         most_free: u64,
     },
+    /// Every resource that could take this need is on a node that is down.
+    NodesDown { need: usize },
     /// Needs tagged to run on one node cannot all be met on one node now.
     SameNode { tag: String },
     /// No resource can ever satisfy this need: a configuration error.
@@ -189,10 +191,16 @@ pub fn capacity_reason(model: &Model, state: &State, j: JobId, free: &[u64]) -> 
         if cands.iter().any(|r| free[r.index()] >= need.amount) {
             continue;
         }
+        if cands
+            .iter()
+            .all(|r| !state.node_up(model.resource(*r).node))
+        {
+            return WaitReason::NodesDown { need: i };
+        }
         // Prefer naming a single resource whose holders, once gone, would make it fit.
         if let Some(&r) = cands
             .iter()
-            .find(|r| model.resource(**r).capacity >= need.amount && state.used(**r) > 0)
+            .find(|r| state.capacity(model, **r) >= need.amount && state.used(**r) > 0)
         {
             return WaitReason::Resource {
                 need: i,

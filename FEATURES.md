@@ -18,6 +18,13 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   (`estimates.rs`). Settings for the EWMA weight, the quantile window and the prior weight. `PLAN-1`'s
   `ListScheduler` reserves and backfills from each job's own static `Phases` estimates today, not yet from a
   `Learner`; wiring it in is follow-up work for whichever piece needs learned estimates in the planner.
+- ✅ **CORE-5 live-model**: a model that changes while it runs (`live.rs`): jobs and groups submitted at
+  runtime (checked like a job set, all or nothing), nodes and resources added, node labels and policy labels
+  (`builds = "false"`: only needs that ask for or tolerate the label land there) changed; capacities set from measurements,
+  a drop below what is held stopping new starts while running jobs keep their place, nodes up, down (drained)
+  or lost (their jobs requeued or failed), with `NodesDown` as a wait reason; finished jobs compacted with
+  dense ids renumbered in order. `State` and both planners read the measured capacity and node state, and the
+  list scheduler's profile counts a shortfall until it clears.
 - 📋 **EXEC-1 executor-state-machine**: leases with fencing tokens, saga cleanup from every state, an append-only
   journal and recovery to safe states, a watchdog per phase, interlocks the planner cannot bypass.
 - 📋 **EXEC-2 realtime-driver**: drive the executor state machine in real time (threads or an async runtime).

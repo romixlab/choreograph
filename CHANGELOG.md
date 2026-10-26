@@ -5,6 +5,25 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Added
+
+- `Live`: a model and its state that change at runtime: `submit` and `submit_group` add jobs checked like a
+  job set, `add_node` and `add_resource` grow the fleet, `set_node_labels` and `set_node_policy` change a
+  node, `compact` removes finished jobs and renumbers the rest, returning a `Remap` (CORE-5).
+- Measured capacities and node state in `State`: `set_capacity` (may drop below what is held: nothing new
+  starts, running jobs keep their resources), `set_node_up` (a drain), `node_lost` with `LostJobs::Requeue`
+  or `Fail`; `capacity`, `headroom`, `measured` and `node_up` to read them (CORE-5).
+- Node policy labels (`Node::policy`, `policy = { builds = "false" }` in a job set): a need lands on such a
+  node only when its selector names each policy label with the same value, in `node_labels` (asks for such a
+  node) or in the new `Selector::tolerate` (accepts one) (CORE-5).
+
+### Changed
+
+- **Breaking:** `WaitReason::NodesDown` for a need whose every candidate is on a node that is down, and the
+  new `Node::policy` and `Selector::tolerate` fields (CORE-5).
+- The list scheduler plans from each resource's headroom, so a capacity measured below what is held delays
+  reservations until enough is released, not just until the first job ends (CORE-5).
+
 ## [0.1.4] - 2026-10-25
 
 ### Added
