@@ -5,6 +5,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-26
+
 ### Added
 
 - Leases (`lease.rs`): `Authority` grants every start as a `Lease` with a fencing `Token`, a TTL and
