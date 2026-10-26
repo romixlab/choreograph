@@ -89,8 +89,13 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
 
 ## TEST: property tests
 
-- 📋 **TEST-1 invariants**: property tests over random job sets: no resource over capacity, cleanup always runs,
-  progress while work remains, bounded waiting with aging, Little's law, determinism.
+- ✅ **TEST-1 invariants**: property tests (`choreograph/tests/invariants.rs`, proptest with a fixed seed) over
+  random fleets, job sets and seeds with `FirstFit` and `ListScheduler` (each backfill mode), in the batch
+  simulator and in a `Live` model driven by a random script (submits, measured capacities, nodes down, up and
+  lost, compactions), checked by an independent replay of the trace: no start over capacity or on a node that
+  is down, every started job reaches cleanup and releases (only a lost node's jobs skip it), progress while work
+  remains, Little's law exactly, determinism; on one exclusive slot the wait is bounded by the aging formula. A
+  deliberately broken planner shows a failure shrinking to one job.
 
 ## CLI: command line
 

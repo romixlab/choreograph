@@ -21,6 +21,8 @@ rand_core = "0.9"
 rand_chacha = { version = "0.9", default-features = false }
 libm = "0.2"
 serde_json = "1"
+# default features off: no fork/timeout machinery, no regex; a fixed seed in every test
+proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }
 
 [profile.dev]
 split-debuginfo = "unpacked"
