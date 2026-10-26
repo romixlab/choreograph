@@ -153,6 +153,18 @@ impl Live {
         }
     }
 
+    /// A job stopped running without its cleanup: it finished, or it is queued again.
+    fn emit_left_running(&mut self, job: JobId) {
+        let event = match self.state.status(job) {
+            JobStatus::Done { outcome, .. } => Event::Finished {
+                job,
+                outcome: *outcome,
+            },
+            _ => Event::Requeued { job },
+        };
+        self.emit(event);
+    }
+
     fn phase_of(&self, j: JobId) -> Option<Phase> {
         match self.state.status(j) {
             JobStatus::Running { phase, .. } => Some(*phase),
@@ -270,14 +282,7 @@ impl Live {
         if self.observed() {
             self.emit(Event::Node { node: n, up: false });
             for &job in &hit {
-                let event = match self.state.status(job) {
-                    JobStatus::Done { outcome, .. } => Event::Finished {
-                        job,
-                        outcome: *outcome,
-                    },
-                    _ => Event::Requeued { job },
-                };
-                self.emit(event);
+                self.emit_left_running(job);
             }
         }
         hit
@@ -342,12 +347,20 @@ impl Live {
 
     /// See [`State::finish`].
     pub fn finish(&mut self, j: JobId, outcome: Outcome) -> Result<(), StateError> {
-        self.state.finish(&self.model, j, outcome)
+        self.state.finish(&self.model, j, outcome)?;
+        if self.observed() {
+            self.emit_left_running(j);
+        }
+        Ok(())
     }
 
     /// See [`State::abandon`].
     pub fn abandon(&mut self, j: JobId, then: LostJobs) -> Result<(), StateError> {
-        self.state.abandon(&self.model, j, then)
+        self.state.abandon(&self.model, j, then)?;
+        if self.observed() {
+            self.emit_left_running(j);
+        }
+        Ok(())
     }
 
     /// See [`State::cancel`].
