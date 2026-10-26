@@ -43,6 +43,7 @@ enum Cmd {
     /// Examples:
     ///   choreograph theory days/*.json --by kind
     ///   choreograph theory days/*.json --by kind --target-wait 5m --json
+    ///   choreograph theory days/*.json --by kind --gate-time 6m
     Theory(theory::Args),
     /// Print a shell completion script.
     Completions {

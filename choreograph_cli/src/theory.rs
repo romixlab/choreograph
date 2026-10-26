@@ -36,6 +36,10 @@ pub struct Args {
     /// The largest batch size to consider.
     #[arg(long, default_value_t = 8)]
     max_batch: u32,
+    /// Size the pick for gate runs of this mean length instead of the measured service (a planned gate that
+    /// runs the full tests, say); c_s² stays the measured one.
+    #[arg(long, value_name = "DUR")]
+    gate_time: Option<Dur>,
     /// Arrivals per simulated run (0: no simulation).
     #[arg(long, default_value_t = 5000)]
     sim_jobs: usize,
@@ -63,6 +67,8 @@ struct Report {
     pick: Option<Pick>,
     /// The simulated mean wait of the worst group with the picked gate slots on top of its lanes.
     pick_simulated_wq: Option<f64>,
+    /// `--gate-time`: the pick is for gate runs of this mean length.
+    gate_time: Option<Dur>,
 }
 
 pub fn run(a: Args) -> Result<(), String> {
@@ -109,8 +115,16 @@ pub fn run(a: Args) -> Result<(), String> {
         max_slots: a.max_slots,
         max_batch: a.max_batch,
     };
+    // With --gate-time, every service time scaled so the mean is that long (the shape stays).
+    let scaled: Vec<Profile> = out
+        .iter()
+        .map(|g| match a.gate_time {
+            Some(d) => scale_service(&g.profile, d),
+            None => g.profile.clone(),
+        })
+        .collect();
     let pick = recording::pick(
-        out.iter().map(|g| (g.name.as_str(), &g.profile)),
+        out.iter().zip(&scaled).map(|(g, p)| (g.name.as_str(), p)),
         &pick_settings,
     );
     let pick_simulated_wq = match &pick {
@@ -119,8 +133,11 @@ pub fn run(a: Args) -> Result<(), String> {
             slots: Some(c),
             ..
         }) => {
-            let g = out.iter().find(|g| &g.name == worst).expect("picked group");
-            simulate(&g.profile, Some(*c))?
+            let i = out
+                .iter()
+                .position(|g| &g.name == worst)
+                .expect("picked group");
+            simulate(&scaled[i], Some(*c))?
         }
         _ => None,
     };
@@ -128,6 +145,7 @@ pub fn run(a: Args) -> Result<(), String> {
         groups: out,
         pick,
         pick_simulated_wq,
+        gate_time: a.gate_time,
     };
     if a.json {
         println!(
@@ -138,6 +156,27 @@ pub fn run(a: Args) -> Result<(), String> {
         print_table(&report, a.by.as_deref().unwrap_or("group"));
     }
     Ok(())
+}
+
+/// The profile with every service time, its own and each lane's, scaled so the group's mean is `mean`.
+fn scale_service(p: &Profile, mean: Dur) -> Profile {
+    let mut p = p.clone();
+    if p.service.n == 0 || p.service.mean <= 0.0 {
+        return p;
+    }
+    let f = mean.0 as f64 / 1000.0 / p.service.mean;
+    let scale = |d: &Dur| Dur((d.0 as f64 * f).round() as i64);
+    for l in p.lanes.values_mut() {
+        l.samples = l.samples.iter().map(scale).collect();
+        l.service = choreograph::metrics::Summary::of(l.samples.iter().copied());
+    }
+    let all: Vec<Dur> = p
+        .lanes
+        .values()
+        .flat_map(|l| l.samples.iter().copied())
+        .collect();
+    p.service = choreograph::metrics::Summary::of(all);
+    p
 }
 
 fn color() -> bool {
@@ -249,8 +288,12 @@ fn print_table(r: &Report, by: &str) {
     };
     println!();
     println!(
-        "{b}Pick{z} for the worst group, {b}{}{z} (busy {:.2}/h, c_a² {:.2}):",
-        p.worst, p.busy_per_hour, p.ca2
+        "{b}Pick{z} for the worst group, {b}{}{z} (busy {:.2}/h, c_a² {:.2}{}):",
+        p.worst,
+        p.busy_per_hour,
+        p.ca2,
+        r.gate_time
+            .map_or(String::new(), |d| format!(", gate runs of {d} on average"))
     );
     match p.slots {
         Some(c) => println!(

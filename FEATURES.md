@@ -118,7 +118,7 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
 
 - 🚧 **CLI-1 cli**: `choreograph check`, `choreograph theory FILES... [--by TAG] [--json]` (recordings per
   group: measured, Kingman, Kingman with the regime fit's IDC, simulated waits, then the gate slots and batch
-  size for the worst group), `choreograph completions SHELL` and `--version` with SHA and commit time work;
+  size for the worst group, `--gate-time` for a planned gate length), `choreograph completions SHELL` and `--version` with SHA and commit time work;
   planned: `plan`, `simulate`, `show`, `sweep`, live values in completion, progress bars.
 - ✅ **CLI-2 top**: `choreograph top`, a live view of a running `choreographd` over its public client/API
   (`choreograph_cli/src/top.rs`): nodes with their resources and labels, running jobs with their lease and

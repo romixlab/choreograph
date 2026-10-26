@@ -18,7 +18,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
   them (rates, burstiness, a two-regime fit, service, failures, waits, per lane), `Profile::predicted_wq`,
   `Profile::simulate` and `recording::pick`, the slots and batch size for the worst group (SIM-5).
 - `choreograph theory FILES... --by TAG`: recordings per group, measured against Kingman and the simulator,
-  and the pick for the worst group; `choreograph completions SHELL` (CLI-1).
+  and the pick for the worst group (`--gate-time DUR`: sized for gate runs of that mean length);
+  `choreograph completions SHELL` (CLI-1).
 
 ## [0.3.2] - 2026-10-26
 

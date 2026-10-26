@@ -144,7 +144,7 @@ pub struct Profile {
     /// Finished `Ok` or `Failed`.
     pub ran: u64,
     pub failed: u64,
-    /// Started and never finished, or cancelled.
+    /// Started and never finished, cancelled, or finished `Cancelled` (held its resources, gave no result).
     pub aborted: u64,
     /// Arrival to start, of the jobs that started.
     pub wait: Summary,
@@ -231,6 +231,9 @@ impl Profile {
                         if outcome == Outcome::Failed {
                             l.failed += 1;
                             p.failed += 1;
+                        }
+                        if outcome == Outcome::Cancelled {
+                            p.aborted += 1;
                         }
                     }
                     (Some(_), _) => p.aborted += 1,
