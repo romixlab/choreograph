@@ -240,7 +240,10 @@ name = "choreograph_cli"
 version = "0.3.1"
 dependencies = [
  "choreograph",
+ "choreographd",
  "clap",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

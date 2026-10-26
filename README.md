@@ -18,6 +18,7 @@ Status: early. What works and what is planned: [FEATURES.md](FEATURES.md). Chang
 
 ```sh
 cargo run -p choreograph_cli -- check examples/bench.toml
+cargo run -p choreograph_cli -- top --socket /run/choreographd/api.sock   # a live view of choreographd
 ```
 
 ## Crates

@@ -13,4 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 choreograph.workspace = true
+choreographd = { path = "../choreographd" }
 clap.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt", "macros", "time"] }

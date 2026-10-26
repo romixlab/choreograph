@@ -5,6 +5,12 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Added
+
+- `choreograph top`: a live view of a running `choreographd` (nodes, running jobs with their leases and
+  ETAs, the queue in priority order with its wait reason and ETA, done jobs); `--once` for a single
+  snapshot, `--json` for agents and the bot, `--color` (CLI-2).
+
 ## [0.3.1] - 2026-10-26
 
 ### Added

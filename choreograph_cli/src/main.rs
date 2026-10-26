@@ -5,6 +5,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+mod top;
+
 const VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
@@ -29,12 +31,15 @@ enum Cmd {
         /// The job set.
         file: PathBuf,
     },
+    /// A live view of a running choreographd: nodes, running jobs, the queue with wait reasons and ETAs.
+    Top(top::TopArgs),
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Check { file } => check(&file),
+        Cmd::Top(args) => top::run(args),
     }
 }
 

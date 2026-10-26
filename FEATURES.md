@@ -101,6 +101,13 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
 
 - 🚧 **CLI-1 cli**: `choreograph check` and `--version` with SHA and commit time work; planned: `plan`,
   `simulate`, `show`, `theory`, `sweep`, shell completion with live values, colour, progress bars.
+- ✅ **CLI-2 top**: `choreograph top`, a live view of a running `choreographd` over its public client/API
+  (`choreograph_cli/src/top.rs`): nodes with their resources and labels, running jobs with their lease and
+  ETA, the queue in priority order with its wait reason text and ETA, done jobs with their outcome; `--once`
+  for a single snapshot, `--json` for the queue view as JSON (agents and the bot), `--color` (auto by
+  default: a terminal without `NO_COLOR`). Stands in for the GUI (GUI-1..3) for now. Batches (PLAN-3a) and a
+  node pressure signal (tpm_cli's memory sampler, not part of this generic service) aren't shown: nothing in
+  `choreographd`'s API carries them yet.
 
 ## SVC: service
 
