@@ -5,6 +5,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-26
+
 ### Added
 
 - `Live::add_kind` and `Authority::add_kind`: a resource kind added at runtime; `Authority::set_settings`
