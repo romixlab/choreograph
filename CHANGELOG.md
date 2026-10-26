@@ -5,6 +5,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-26
+
 ### Added
 
 - `choreograph top`: a live view of a running `choreographd` (nodes, running jobs with their leases and
