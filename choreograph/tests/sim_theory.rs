@@ -9,7 +9,10 @@
 
 use std::collections::BTreeMap;
 
+use choreograph::metrics::{MetricsConfig, from_trace};
+use choreograph::model::Model;
 use choreograph::model::{Job, Labels, ModelBuilder, Unit};
+use choreograph::sim::SimRun;
 use choreograph::sim::{Arrivals, Dist, PhaseDists, SimConfig, Template, Workload, simulate};
 use choreograph::theory;
 use choreograph::{Dur, FirstFit, Time, Trace, trace::Event};
@@ -41,6 +44,13 @@ fn waits(tr: &Trace, jobs: usize) -> (f64, f64) {
 /// Simulates Poisson arrivals at utilisation `rho` on `c` slots with service times from `service`; returns
 /// the measured W_q in seconds, the share of jobs that waited, and the arrival rate per second.
 fn run(c: u64, rho: f64, service: Dist) -> (f64, f64, f64) {
+    let (_, r, lambda) = sim(c, rho, service);
+    let (wq, waited) = waits(&r.trace, JOBS);
+    (wq, waited, lambda)
+}
+
+/// The run behind [`run`]: the model, the finished run and the arrival rate per second.
+fn sim(c: u64, rho: f64, service: Dist) -> (Model, SimRun, f64) {
     let jobs = JOBS;
     let seed = 1;
     let mean_s = service.mean_ms() / 1000.0;
@@ -68,8 +78,7 @@ fn run(c: u64, rho: f64, service: Dist) -> (f64, f64, f64) {
     };
     let r = simulate(&g.model, &mut FirstFit, &cfg).unwrap();
     assert!(r.state.all_done());
-    let (wq, waited) = waits(&r.trace, jobs);
-    (wq, waited, lambda)
+    (g.model, r, lambda)
 }
 
 fn within(measured: f64, predicted: f64, rel: f64) {
@@ -133,4 +142,38 @@ fn mg1_lognormal_pollaczek_khinchine() {
     let fit = theory::lognormal_from_p50_p90(138.0, 471.0);
     let (wq, _, lambda) = run(1, 0.7, service);
     within(wq, theory::pk_wq(lambda, fit.mean, fit.cs2).unwrap(), 0.10);
+}
+
+/// The metrics of the M/M/3 run: Little's law exact over the whole run (it starts and ends empty), and after a
+/// warm-up of a tenth of the run, the comparison's Erlang C row within the tolerance of `mmc_erlang_c` (its
+/// inputs, λ and E[S], are measured from the run).
+#[test]
+fn metrics_compare_mmc() {
+    let (model, r, lambda) = sim(3, 0.8, EXP_60S);
+    let all = from_trace(&model, &r.trace, &MetricsConfig::default());
+    assert!(all.little.holds(), "{:?}", all.little);
+    assert_eq!(all.jobs.len(), JOBS);
+    let warm = MetricsConfig {
+        warmup: Dur((JOBS as f64 / 10.0 / lambda * 1000.0) as i64),
+        ..MetricsConfig::default()
+    };
+    let m = from_trace(&model, &r.trace, &warm);
+    let cmp = m.compare(3);
+    let row = cmp
+        .rows
+        .iter()
+        .find(|r| r.formula == "M/M/c Erlang C")
+        .unwrap();
+    within(row.measured, row.predicted.unwrap(), 0.08);
+    let rho = &cmp.rows[0];
+    within(rho.measured, 0.8, 0.02);
+    within(m.resources[0].utilisation.unwrap(), 0.8, 0.02);
+    // Batch means give an interval that covers the theory's value.
+    let ci = m.batch_means(20, 0.95).unwrap();
+    let wq = theory::mmc_wq(lambda, 60.0, 3).unwrap();
+    assert!(
+        (ci.mean - wq).abs() <= ci.half_width.max(0.08 * wq),
+        "{ci:?} vs {wq}"
+    );
+    println!("{cmp}");
 }

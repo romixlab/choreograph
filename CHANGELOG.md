@@ -5,6 +5,19 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Added
+
+- Metrics from a trace (`metrics`): utilisation per resource, queue length over time, waiting and sojourn
+  times overall and per class, lateness and tardiness, makespan, throughput, setup share, cache hit rate,
+  Little's law checked exactly; a warm-up cut, confidence intervals over replications and batch means;
+  `Metrics::compare` puts each value next to the queueing formulas (SIM-2).
+- `Live::record_events` and `Live::drain_events`: a live model's changes as trace events; `Live::measure` and
+  `Live::metrics`: its metrics as it runs, kept across compactions (SIM-2).
+
+### Changed
+
+- **Breaking:** trace format version 2 with the events `requeued`, `capacity`, `node` and `compacted` (SIM-2).
+
 ## [0.2.1] - 2026-10-26
 
 ### Added

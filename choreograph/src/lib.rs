@@ -23,6 +23,8 @@
 //! - [`sim`]: the discrete-event simulator: random durations, failures, arrival processes, seeded streams.
 //! - [`estimates`]: the [`Estimates`] trait and [`Learner`], which learns phase durations from history.
 //! - [`trace`]: the event trace shared by simulation, execution and playback.
+//! - [`metrics`]: metrics from a trace (utilisation, queue length, waits per class, lateness, Little's law)
+//!   next to the theory's predictions.
 //! - [`theory`]: queueing formulas (Erlang C, Kingman, Pollaczek–Khinchine, Cobham, ...) for comparison.
 //! - [`jobset`] (feature `toml`): the TOML job-set format.
 //!
@@ -63,6 +65,7 @@ pub mod jobset;
 pub mod lease;
 pub mod list;
 pub mod live;
+pub mod metrics;
 pub mod model;
 pub mod plan;
 pub mod policy;
@@ -76,6 +79,7 @@ pub use estimates::{EstimateKey, EstimateSettings, Estimates, Learner, Quantiles
 pub use lease::{Authority, Beat, Entry, Lease, LeaseError, LeaseSettings, Op, Token};
 pub use list::{Eta, Forecast, ListScheduler, Span};
 pub use live::Live;
+pub use metrics::{Collector, Metrics, MetricsConfig};
 pub use model::{
     Estimate, Job, JobId, Model, ModelBuilder, ModelError, Need, NodeId, Phase, Remap, ResourceId,
 };

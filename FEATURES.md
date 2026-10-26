@@ -76,8 +76,16 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   `sim/workload.rs`), seeded ChaCha8 streams per purpose and job (common random numbers across policies), trace
   output. Long runs match M/M/1, M/M/c (Erlang C), M/D/1 and M/G/1 (Pollaczek–Khinchine) within stated
   tolerances (`tests/sim_theory.rs`).
-- 📋 **SIM-2 trace-metrics**: utilisation, queue length, waiting and sojourn times per class, lateness and
-  tardiness, makespan, Little's law self-check, and the matching theory predictions.
+- ✅ **SIM-2 trace-metrics**: metrics from a trace (`metrics.rs`): a streaming `Collector` that reads job details
+  from the model as events come in (so it follows a live model through compactions), utilisation per resource
+  against the measured capacity (0 while a node is down), L_q(t) as a step series with its mean and maximum, L,
+  waiting and sojourn time overall and per class (mean, c², p50, p90, max), lateness, tardiness, late jobs,
+  weighted tardiness, makespan, throughput, setup share, cache hit rate; Little's law checked in exact integers
+  (`Little`), exact on runs that start and end empty; a warm-up cut, Student-t confidence intervals over
+  replications and batch means; `Metrics::compare`, each measured value next to M/M/1, M/M/c, P-K, Kingman,
+  Allen–Cunneen, Little and Cobham fed with the measured inputs. `Live::measure` measures a live model as it
+  runs, `Live::record_events` records its trace (format version 2: requeues, capacities, node up and down,
+  compactions).
 
 ## TEST: property tests
 

@@ -3,16 +3,19 @@
 //! One format for a simulated run, a real executor's journal and the GUI's playback. A trace starts with a
 //! [`Header`] that names the format version; every [`Record`] after it is one event at one time, in time order
 //! (events at the same time in the order they were applied).
+//!
+//! Version 2 adds the events of a model that changes at runtime ([`Live`](crate::live::Live)): a job requeued
+//! when its node is lost, a capacity measured, a node going down or up, finished jobs compacted away.
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{JobId, Phase};
+use crate::model::{JobId, NodeId, Phase, ResourceId};
 use crate::plan::WaitReason;
 use crate::state::{Assignment, Outcome};
 use crate::time::Time;
 
 /// The trace format version. Readers refuse a newer major version.
-pub const TRACE_VERSION: u32 = 1;
+pub const TRACE_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Header {
@@ -38,6 +41,18 @@ pub enum Event {
     Finished { job: JobId, outcome: Outcome },
     /// The reason a job waits changed (recorded only on change, to keep traces small).
     Waiting { job: JobId, reason: WaitReason },
+    /// The node of a running job was lost: the job released everything without cleanup and is queued again.
+    Requeued { job: JobId },
+    /// A resource's capacity was measured (`None`: back to the declared one).
+    Capacity {
+        resource: ResourceId,
+        capacity: Option<u64>,
+    },
+    /// A node went down (its resources count with no capacity) or came back up.
+    Node { node: NodeId, up: bool },
+    /// These finished jobs were removed; every later job id is renumbered down past them, in order (see
+    /// [`Remap`](crate::model::Remap)).
+    Compacted { removed: Vec<JobId> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

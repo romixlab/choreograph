@@ -14,6 +14,11 @@
 //!   [`Live::set_node_policy`] change what a node offers and which work it keeps away (see [`Node::policy`]);
 //! - [`Live::compact`] removes finished jobs, so memory stays bounded however long it runs.
 //!
+//! What happens can be recorded as trace events ([`Live::record_events`], taken with [`Live::drain_events`]
+//! for a journal or a viewer) and measured as it happens ([`Live::measure`], read with [`Live::metrics`]).
+//! Both see every change made through `Live`'s own methods; changes made through [`Live::parts_mut`] are not
+//! recorded.
+//!
 //! Planners read [`Live::model`] and [`Live::state`] as before; the planner and the state work from the indexes
 //! of queued and running jobs, so a round costs what is waiting and running, not what ever ran.
 //!
@@ -43,18 +48,27 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::metrics::{Collector, Metrics, MetricsConfig};
 use crate::model::{
-    GroupId, Job, JobId, Labels, Model, ModelError, Node, NodeId, Remap, Resource, ResourceId,
+    GroupId, Job, JobId, Labels, Model, ModelError, Node, NodeId, Phase, Remap, Resource,
+    ResourceId,
 };
 use crate::plan::{Plan, Planner};
 use crate::state::{Assignment, JobStatus, LostJobs, Outcome, State, StateError};
 use crate::time::Time;
+use crate::trace::{Event, Record};
 
 /// A model and its state that change together at runtime.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Live {
     model: Model,
     state: State,
+    /// The recorded events not yet drained, while recording.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    events: Option<Vec<Record>>,
+    /// The running measurement, while measuring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    collector: Option<Collector>,
 }
 
 impl Live {
@@ -64,7 +78,86 @@ impl Live {
         for j in model.job_ids() {
             state.arrive(j).expect("a new state has every job pending");
         }
-        Live { model, state }
+        Live {
+            model,
+            state,
+            events: None,
+            collector: None,
+        }
+    }
+
+    /// Starts or stops recording what happens as trace events, kept until [`Live::drain_events`] takes them.
+    /// Starting records an `Arrived` for each job queued now, so the jobs given to [`Live::new`] are in it.
+    pub fn record_events(&mut self, on: bool) {
+        if !on {
+            self.events = None;
+        } else if self.events.is_none() {
+            self.events = Some(Vec::new());
+            let now = self.state.now();
+            let queued: Vec<JobId> = self.state.queued().collect();
+            let events = self.events.as_mut().expect("just set");
+            events.extend(queued.into_iter().map(|job| Record {
+                t: now,
+                event: Event::Arrived { job },
+            }));
+        }
+    }
+
+    /// The events recorded since the last call, in order (empty while not recording).
+    pub fn drain_events(&mut self) -> Vec<Record> {
+        self.events.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    /// Starts measuring from now (again from scratch if a measurement runs): every change is fed to a
+    /// [`Collector`] as it happens, with the model as it is then, so compactions do not lose finished jobs. Jobs
+    /// queued now count as arriving now; jobs already running are not in it.
+    pub fn measure(&mut self, cfg: MetricsConfig) {
+        let now = self.state.now();
+        let mut c = Collector::new(&self.model, now, cfg);
+        for job in self.state.queued() {
+            c.record(
+                &self.model,
+                &Record {
+                    t: now,
+                    event: Event::Arrived { job },
+                },
+            );
+        }
+        self.collector = Some(c);
+    }
+
+    /// The metrics measured so far, up to now; `None` while not measuring.
+    pub fn metrics(&self) -> Option<Metrics> {
+        self.collector.as_ref().map(|c| c.metrics(self.state.now()))
+    }
+
+    /// Stops measuring and returns the collector.
+    pub fn stop_measuring(&mut self) -> Option<Collector> {
+        self.collector.take()
+    }
+
+    fn observed(&self) -> bool {
+        self.events.is_some() || self.collector.is_some()
+    }
+
+    fn emit(&mut self, event: Event) {
+        let rec = Record {
+            t: self.state.now(),
+            event,
+        };
+        if let Some(c) = &mut self.collector {
+            c.record(&self.model, &rec);
+        }
+        if let Some(e) = &mut self.events {
+            e.push(rec);
+        }
+    }
+
+    fn phase_of(&self, j: JobId) -> Option<Phase> {
+        match self.state.status(j) {
+            JobStatus::Running { phase, .. } => Some(*phase),
+            _ => None,
+        }
     }
 
     pub fn model(&self) -> &Model {
@@ -112,6 +205,9 @@ impl Live {
         self.state.grow(&self.model);
         for j in &ids {
             self.state.arrive(*j).expect("a new job is pending");
+            if self.observed() {
+                self.emit(Event::Arrived { job: *j });
+            }
         }
         Ok(ids)
     }
@@ -152,16 +248,39 @@ impl Live {
     /// See [`State::set_capacity`].
     pub fn set_capacity(&mut self, r: ResourceId, capacity: Option<u64>) {
         self.state.set_capacity(r, capacity);
+        if self.observed() {
+            self.emit(Event::Capacity {
+                resource: r,
+                capacity,
+            });
+        }
     }
 
     /// See [`State::set_node_up`].
     pub fn set_node_up(&mut self, n: NodeId, up: bool) {
         self.state.set_node_up(n, up);
+        if self.observed() {
+            self.emit(Event::Node { node: n, up });
+        }
     }
 
     /// See [`State::node_lost`].
     pub fn node_lost(&mut self, n: NodeId, then: LostJobs) -> Vec<JobId> {
-        self.state.node_lost(&self.model, n, then)
+        let hit = self.state.node_lost(&self.model, n, then);
+        if self.observed() {
+            self.emit(Event::Node { node: n, up: false });
+            for &job in &hit {
+                let event = match self.state.status(job) {
+                    JobStatus::Done { outcome, .. } => Event::Finished {
+                        job,
+                        outcome: *outcome,
+                    },
+                    _ => Event::Requeued { job },
+                };
+                self.emit(event);
+            }
+        }
+        hit
     }
 
     /// Asks a planner what starts now.
@@ -171,17 +290,54 @@ impl Live {
 
     /// See [`State::start`].
     pub fn start(&mut self, batch: &[(JobId, Assignment)]) -> Result<(), StateError> {
-        self.state.start(&self.model, batch)
+        self.state.start(&self.model, batch)?;
+        if self.observed() {
+            for (job, a) in batch {
+                self.emit(Event::Started {
+                    job: *job,
+                    assignment: a.clone(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// See [`State::advance`].
     pub fn advance(&mut self, j: JobId) -> Result<&JobStatus, StateError> {
-        self.state.advance(&self.model, j)
+        self.state.advance(&self.model, j)?;
+        if self.observed() {
+            let event = match self.state.status(j) {
+                JobStatus::Running { phase, .. } => Event::Phase {
+                    job: j,
+                    phase: *phase,
+                },
+                JobStatus::Done { outcome, .. } => Event::Finished {
+                    job: j,
+                    outcome: *outcome,
+                },
+                other => unreachable!("advanced into {other:?}"),
+            };
+            self.emit(event);
+        }
+        Ok(self.state.status(j))
     }
 
     /// See [`State::fail`].
     pub fn fail(&mut self, j: JobId) -> Result<(), StateError> {
-        self.state.fail(j)
+        let phase = self.phase_of(j);
+        self.state.fail(j)?;
+        if self.observed()
+            && let Some(phase) = phase
+        {
+            self.emit(Event::Failed { job: j, phase });
+            if phase != Phase::Cleanup {
+                self.emit(Event::Phase {
+                    job: j,
+                    phase: Phase::Cleanup,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// See [`State::finish`].
@@ -196,7 +352,18 @@ impl Live {
 
     /// See [`State::cancel`].
     pub fn cancel(&mut self, j: JobId) -> Result<(), StateError> {
-        self.state.cancel(j)
+        let phase = self.phase_of(j);
+        self.state.cancel(j)?;
+        if self.observed() {
+            self.emit(Event::Cancelled { job: j });
+            if phase.is_some_and(|p| p != Phase::Cleanup) {
+                self.emit(Event::Phase {
+                    job: j,
+                    phase: Phase::Cleanup,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Removes the jobs done at or before `done_by`, except those a remaining job comes after, and the groups
@@ -207,6 +374,12 @@ impl Live {
         let keep = self.state.keep_after_compaction(&self.model, done_by);
         let remap = self.model.compact(&keep);
         self.state.remap(&remap);
+        if self.observed() {
+            let removed: Vec<JobId> = remap.removed().collect();
+            if !removed.is_empty() {
+                self.emit(Event::Compacted { removed });
+            }
+        }
         remap
     }
 }
