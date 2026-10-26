@@ -5,6 +5,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-26
+
 ### Added
 
 - Regime-switching arrivals in the simulator: `Arrivals::Mmpp` (a Markov-modulated Poisson process over
