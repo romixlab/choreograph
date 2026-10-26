@@ -102,6 +102,20 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
 - 🚧 **CLI-1 cli**: `choreograph check` and `--version` with SHA and commit time work; planned: `plan`,
   `simulate`, `show`, `theory`, `sweep`, shell completion with live values, colour, progress bars.
 
+## SVC: service
+
+- ✅ **SVC-1 choreographd**: the scheduler as a service (`choreographd/`): tokio and axum on a Unix socket by
+  default (callers name themselves, the socket's mode is the access control; every call one request and one
+  answer, waits bounded, so a mesh proxy can carry them), or TCP over rustls on a pure-Rust crypto provider
+  with one bearer token per client (required beyond loopback); a JSON API to submit jobs and groups, wait with
+  a live wait reason and ETA, keep and release leases with fencing tokens, report nodes and their room, and
+  see the queue; a TOML config for kinds (shared kinds made on first use), policy, lease and service settings;
+  tokens stored as a hash; a journal replayed on restart; silent nodes drained, abandoned queued jobs
+  cancelled; a typed client over the socket, HTTP, HTTPS or in process; a systemd unit
+  (`choreographd/deploy/`) that restarts with a growing pause and stops on exit 78. Tests:
+  `choreographd/tests/e2e.rs` (several clients on paused time), `choreographd/tests/tls.rs`,
+  `choreographd/tests/unix.rs`.
+
 ## GUI: graphical interface
 
 - 📋 **GUI-1 gui-timeline**: an egui app: load a job set or trace, a timeline per resource grouped by node.

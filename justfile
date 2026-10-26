@@ -16,11 +16,14 @@ test-all *flags:
 lint:
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo fmt --all --check
+    # no C: no -sys crate, no cc, cmake or bindgen in the build (AGENTS.md)
+    ! cargo tree --workspace --all-features -e normal,build --prefix none | rg -q '^(cc|cmake|bindgen|[a-z0-9_-]+-sys) '
 
-# Build and put the choreograph binary on PATH once: through tpm install when tpm is there, else cargo install
+# Build and put the choreograph and choreographd binaries on PATH once: through tpm install when tpm is there,
+# else cargo install
 install:
-    cargo build --profile deploy --locked -p choreograph_cli
-    if command -v tpm >/dev/null; then tpm install target/deploy/choreograph; else cargo install --locked --path choreograph_cli; fi
+    cargo build --profile deploy --locked -p choreograph_cli -p choreographd
+    if command -v tpm >/dev/null; then tpm install target/deploy/choreograph target/deploy/choreographd; else cargo install --locked --path choreograph_cli && cargo install --locked --path choreographd; fi
 
 # Bring this checkout up to main and install
 deploy:
@@ -28,4 +31,5 @@ deploy:
     git pull --ff-only
     just install
     choreograph --version | grep -qF "($(git rev-parse --short HEAD)"
+    choreographd --version | grep -qF "($(git rev-parse --short HEAD)"
     choreograph --version

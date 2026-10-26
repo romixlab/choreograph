@@ -1,0 +1,51 @@
+# An example choreographd configuration for a service reached over the network without a mesh in front: TCP
+# with TLS and a token per client. Every key is described in the crate docs (choreographd::config).
+# Durations are written like `1h30m` or as milliseconds.
+
+listen = "0.0.0.0:7470"
+state_dir = "/var/lib/choreographd"
+tokens = true
+
+[tls]
+# Relative paths resolve in $CREDENTIALS_DIRECTORY (systemd LoadCredential=), else beside this file.
+cert = "cert.pem"
+key = "key.pem"
+
+# Resources the build machines report, per node.
+[[kind]]
+name = "ram"
+unit = "bytes"
+
+[[kind]]
+name = "cores"
+unit = "millicores"
+
+[[kind]]
+name = "gate"   # test-gate slots
+
+# One holder at a time per repository: a job names it (`"resource": "my-repo/main"`).
+[[kind]]
+name = "main"
+shared = true
+
+[policy]
+aging_per_class = "1h"
+
+[lease]
+ttl = "1m"
+on_expiry = "requeue"
+
+[settings]
+node_stale = "2m"
+queued_stale = "3m"
+max_wait = "60s"
+
+# `choreographd token NAME --report NODE` makes a token and prints a block like these.
+[[client]]
+name = "build-1"
+token_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+report = ["build-1"]
+
+[[client]]
+name = "lander"
+token_sha256 = "1111111111111111111111111111111111111111111111111111111111111111"

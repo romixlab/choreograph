@@ -10,6 +10,14 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 - `Live::add_kind` and `Authority::add_kind`: a resource kind added at runtime; `Authority::set_settings`
   replaces the lease settings (a new TTL after a restart). Both are journaled (`Op::AddKind`,
   `Op::SetSettings`) (CORE-5, EXEC-1).
+- `choreographd`, the scheduler as a service: a JSON API to submit jobs, wait for them with a live wait
+  reason and ETA, keep and release leases, report nodes and see the queue; a TOML config, a journal that
+  survives restarts, a typed client (`choreographd::client`) and a systemd unit (SVC-1). It listens on a Unix
+  socket by default, without tokens (callers name themselves; the socket's mode decides who may call), so a
+  mesh proxy can carry its calls between machines: every call is one request and one answer, and a wait is a
+  bounded long poll (`timeout=0`: a short poll). TLS and a token per client are optional, for a TCP listener;
+  beyond loopback both are required. A job whose lease expired starts again only once its client asked for
+  it; if it would start before, it is cancelled.
 
 ## [0.3.0] - 2026-10-26
 

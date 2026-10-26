@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["choreograph", "choreograph_cli"]
+members = ["choreograph", "choreograph_cli", "choreographd"]
 
 [workspace.package]
 version = "0.3.0"

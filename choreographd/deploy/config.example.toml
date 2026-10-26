@@ -1,0 +1,38 @@
+# An example choreographd configuration: a merge queue on a few build machines, the service on its Unix
+# socket. Whoever may open the socket (its group, see socket_mode) may call, naming its client in the
+# `Choreograph-Client` header; a proxy in front (a mesh) carries the calls between machines. For TCP with TLS
+# and tokens see config.tls.example.toml. Every key is described in the crate docs (choreographd::config).
+# Durations are written like `1h30m` or as milliseconds.
+
+listen = "/run/choreographd/api.sock"
+socket_mode = "0660"
+state_dir = "/var/lib/choreographd"
+
+# Resources the build machines report, per node.
+[[kind]]
+name = "ram"
+unit = "bytes"
+
+[[kind]]
+name = "cores"
+unit = "millicores"
+
+[[kind]]
+name = "gate"   # test-gate slots
+
+# One holder at a time per repository: a job names it (`"resource": "my-repo/main"`).
+[[kind]]
+name = "main"
+shared = true
+
+[policy]
+aging_per_class = "1h"
+
+[lease]
+ttl = "1m"
+on_expiry = "requeue"
+
+[settings]
+node_stale = "2m"
+queued_stale = "3m"
+max_wait = "60s"
