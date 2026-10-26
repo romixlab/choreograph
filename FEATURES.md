@@ -47,9 +47,12 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   C, M/M/c, Allen–Cunneen, Cobham's priority formula, lognormal fit from p50/p90, speculation yield, aging
   overtake time (`theory.rs`).
 
-- 🚧 **THEORY-2 slots-and-batches**: done: the two-state MMPP's rate and index of dispersion, gate runs per
-  entry of batched gates with bisection (`theory.rs`). Planned: picking gate slots and the batch size for the
-  worst of several traffic profiles.
+- ✅ **THEORY-2 slots-and-batches**: the two-state MMPP's rate and index of dispersion, gate runs per entry of
+  batched gates with bisection, an entry's time to result through a batched lane (`batch_latency`), and the
+  picks: `pick_slots` (fewest gate slots under a utilisation cap and a wait target, Allen–Cunneen) and
+  `pick_batch` (the batch size with the shortest time to result), with `PickSettings` (`theory.rs`);
+  `recording::pick` applies them to the worst of several traffic profiles, the one whose busy regime predicts
+  the longest wait.
 
 ## PLAN: planners
 
@@ -95,9 +98,11 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   current regime's rate, exponential stays, the next regime drawn uniformly from the others; `Arrivals::mmpp2`
   for a busy and a quiet regime. A long run matches the theory's rate and index of dispersion
   (`theory::mmpp2_rate`, `mmpp2_idc`).
-- 📋 **SIM-5 recordings-and-profiles**: a recording (model, trace, tags) of real history; per group of
-  recordings the traffic profile (λ, c_a², E[S], c_s², failure rate, hourly burstiness, a two-regime MMPP fit,
-  measured waits).
+- ✅ **SIM-5 recordings-and-profiles**: `Recording` (model, trace, tags) of real history (`recording.rs`);
+  `Profile::measure` of a group: λ per active hour, c_a² of gaps, the index of dispersion of binned counts, a
+  two-regime MMPP fit (`Mmpp2Fit`), service, failures and aborts, measured waits, and the same per lane (the
+  job name before `#`); `predicted_wq` (Kingman per lane), `simulate` (the lanes in the simulator under the
+  fitted arrivals, empirical service, optional gate slots).
 
 ## TEST: property tests
 
@@ -111,8 +116,10 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
 
 ## CLI: command line
 
-- 🚧 **CLI-1 cli**: `choreograph check` and `--version` with SHA and commit time work; planned: `plan`,
-  `simulate`, `show`, `theory`, `sweep`, shell completion with live values, colour, progress bars.
+- 🚧 **CLI-1 cli**: `choreograph check`, `choreograph theory FILES... [--by TAG] [--json]` (recordings per
+  group: measured, Kingman, Kingman with the regime fit's IDC, simulated waits, then the gate slots and batch
+  size for the worst group), `choreograph completions SHELL` and `--version` with SHA and commit time work;
+  planned: `plan`, `simulate`, `show`, `sweep`, live values in completion, progress bars.
 - ✅ **CLI-2 top**: `choreograph top`, a live view of a running `choreographd` over its public client/API
   (`choreograph_cli/src/top.rs`): nodes with their resources and labels, running jobs with their lease and
   ETA, the queue in priority order with its wait reason text and ETA, done jobs with their outcome; `--once`

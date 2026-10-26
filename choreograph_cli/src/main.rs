@@ -3,7 +3,10 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
+
+mod theory;
 
 mod top;
 
@@ -29,10 +32,23 @@ enum Cmd {
     /// Load a TOML job set, validate it and print a summary.
     Check {
         /// The job set.
+        #[arg(value_hint = clap::ValueHint::FilePath)]
         file: PathBuf,
     },
     /// A live view of a running choreographd: nodes, running jobs, the queue with wait reasons and ETAs.
     Top(top::TopArgs),
+    /// Measure recordings of real history against queueing theory and the simulator, and pick gate slots and
+    /// a batch size for the worst group.
+    ///
+    /// Examples:
+    ///   choreograph theory days/*.json --by kind
+    ///   choreograph theory days/*.json --by kind --target-wait 5m --json
+    Theory(theory::Args),
+    /// Print a shell completion script.
+    Completions {
+        /// bash, zsh, fish, elvish or powershell.
+        shell: Shell,
+    },
 }
 
 fn main() -> ExitCode {
@@ -40,6 +56,22 @@ fn main() -> ExitCode {
     match cli.cmd {
         Cmd::Check { file } => check(&file),
         Cmd::Top(args) => top::run(args),
+        Cmd::Theory(a) => match theory::run(a) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Cmd::Completions { shell } => {
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "choreograph",
+                &mut std::io::stdout(),
+            );
+            ExitCode::SUCCESS
+        }
     }
 }
 

@@ -11,6 +11,14 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
   `Regime`s, each a rate and a mean stay) and `Arrivals::mmpp2` for busy and quiet stretches (SIM-4).
 - `theory::mmpp2_rate` and `theory::mmpp2_idc` (the long-run rate and index of dispersion of a two-state MMPP)
   and `theory::batch_runs_per_entry` (gate runs per entry of batched gates with bisection) (THEORY-2).
+- `theory::pick_slots`, `theory::batch_latency` and `theory::pick_batch` with `PickSettings`: the fewest gate
+  slots under a utilisation cap and a wait target, and the batch size with the shortest time to result
+  (THEORY-2).
+- `recording`: `Recording` (model, trace and tags of real history, JSON), `Profile::measure` of a group of
+  them (rates, burstiness, a two-regime fit, service, failures, waits, per lane), `Profile::predicted_wq`,
+  `Profile::simulate` and `recording::pick`, the slots and batch size for the worst group (SIM-5).
+- `choreograph theory FILES... --by TAG`: recordings per group, measured against Kingman and the simulator,
+  and the pick for the worst group; `choreograph completions SHELL` (CLI-1).
 
 ## [0.3.2] - 2026-10-26
 

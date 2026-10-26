@@ -23,6 +23,8 @@
 //! - [`sim`]: the discrete-event simulator: random durations, failures, arrival processes, seeded streams.
 //! - [`estimates`]: the [`Estimates`] trait and [`Learner`], which learns phase durations from history.
 //! - [`trace`]: the event trace shared by simulation, execution and playback.
+//! - [`recording`]: a recording of real history (model, trace, tags) and the [`Profile`] of a group of them:
+//!   arrival rates and burstiness, a two-regime fit, service, failures, per lane; picks gate slots and batches.
 //! - [`metrics`]: metrics from a trace (utilisation, queue length, waits per class, lateness, Little's law)
 //!   next to the theory's predictions.
 //! - [`theory`]: queueing formulas (Erlang C, Kingman, Pollaczek–Khinchine, Cobham, ...) for comparison.
@@ -69,6 +71,7 @@ pub mod metrics;
 pub mod model;
 pub mod plan;
 pub mod policy;
+pub mod recording;
 pub mod sim;
 pub mod state;
 pub mod theory;
@@ -85,6 +88,7 @@ pub use model::{
 };
 pub use plan::{FirstFit, Plan, Planner, Reservation, Start, WaitReason};
 pub use policy::{Backfill, Placement, Policy, Quantile};
+pub use recording::{Profile, ProfileSettings, Recording};
 pub use sim::{SimConfig, SimRun, simulate};
 pub use state::{Assignment, JobStatus, LostJobs, Outcome, State, StateError};
 pub use time::{Dur, Time};

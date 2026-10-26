@@ -21,6 +21,13 @@ cargo run -p choreograph_cli -- check examples/bench.toml
 cargo run -p choreograph_cli -- top --socket /run/choreographd/api.sock   # a live view of choreographd
 ```
 
+Recordings of real history (JSON files of `{tags, model, trace}`, one per day, say) measured against queueing
+theory and the simulator, grouped by a tag, with the gate slots and batch size the worst group needs:
+
+```sh
+choreograph theory days/*.json --by kind
+```
+
 ## Crates
 
 - `choreograph`: the library (model, state, planners, trace, queueing formulas, TOML job sets).

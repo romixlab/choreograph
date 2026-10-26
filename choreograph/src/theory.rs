@@ -164,6 +164,73 @@ pub fn batch_runs_per_entry(p: f64, b: u32) -> f64 {
     (1.0 + (1.0 - (1.0 - p).powi(b as i32)) * 2.0 * bf.log2()) / bf
 }
 
+/// What [`pick_slots`] and [`pick_batch`] aim for.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct PickSettings {
+    /// The highest utilisation ρ a pick of gate slots may run at: headroom for estimates that are off.
+    pub max_util: f64,
+    /// The mean wait in queue a pick of gate slots must stay under, in the caller's time unit.
+    pub target_wq: f64,
+    /// Never pick more gate slots than this.
+    pub max_slots: u32,
+    /// The largest batch [`pick_batch`] considers.
+    pub max_batch: u32,
+}
+
+impl Default for PickSettings {
+    fn default() -> Self {
+        PickSettings {
+            max_util: 0.7,
+            target_wq: 10.0,
+            max_slots: 16,
+            max_batch: 8,
+        }
+    }
+}
+
+/// The smallest number of gate slots c with ρ ≤ `max_util` and the Allen–Cunneen W_q ≤ `target_wq`; `None` when
+/// even `max_slots` do not get there. Pass the arrival process's index of dispersion as `ca2` for bursty
+/// (regime-switching) arrivals: it is the c_a² heavy traffic sees.
+pub fn pick_slots(lambda: f64, mean: f64, ca2: f64, cs2: f64, s: &PickSettings) -> Option<u32> {
+    (1..=s.max_slots).find(|&c| {
+        utilisation(lambda, mean, c) <= s.max_util
+            && allen_cunneen_wq(lambda, mean, c, ca2, cs2).is_some_and(|w| w <= s.target_wq)
+    })
+}
+
+/// An entry's mean time from arrival to its result through one lane (a repository's main branch) that gates
+/// batches of `b`: waiting for the batch to fill, (b − 1)/(2λ); Kingman's W_q for gate runs arriving at
+/// λ·[`batch_runs_per_entry`] with the entries' c_a² (an upper bound: batching smooths arrivals); the run itself;
+/// and, when the batch is red (1 − (1 − p)^b), log₂ b more rounds of bisection. `None` when the lane is
+/// overloaded.
+pub fn batch_latency(lambda: f64, mean: f64, ca2: f64, cs2: f64, p: f64, b: u32) -> Option<f64> {
+    let b = b.max(1);
+    let bf = b as f64;
+    let runs = lambda * batch_runs_per_entry(p, b);
+    let form = (bf - 1.0) / (2.0 * lambda);
+    let red = 1.0 - (1.0 - p).powi(b as i32);
+    Some(form + kingman_wq(runs, mean, ca2, cs2)? + mean + red * bf.log2() * mean)
+}
+
+/// The batch size in 1..=`max_batch` with the lowest [`batch_latency`], and that latency; ties go to the smaller
+/// batch. `None` when every size overloads the lane.
+pub fn pick_batch(
+    lambda: f64,
+    mean: f64,
+    ca2: f64,
+    cs2: f64,
+    p: f64,
+    s: &PickSettings,
+) -> Option<(u32, f64)> {
+    (1..=s.max_batch.max(1))
+        .filter_map(|b| batch_latency(lambda, mean, ca2, cs2, p, b).map(|l| (b, l)))
+        .fold(None, |best: Option<(u32, f64)>, (b, l)| match best {
+            Some((_, bl)) if bl <= l => best,
+            _ => Some((b, l)),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +360,36 @@ mod tests {
         // b = 8: fewer runs still, but a red batch takes 2·log₂ 8 = 6 more rounds; at p = 0.05 far fewer.
         close(batch_runs_per_entry(0.22, 8), 0.772, 0.001);
         close(batch_runs_per_entry(0.05, 8), 0.377, 0.001);
+    }
+
+    #[test]
+    fn slots_for_a_bursty_gate_pool() {
+        let s = PickSettings::default();
+        // 36/h at 4 min, c_s² 1.5: three slots run at ρ = 0.8, over the 0.7 cap; four give W_q 1.7 with c_a² 3.19.
+        assert_eq!(pick_slots(0.6, 4.0, 3.19, 1.5, &s), Some(4));
+        // Burstier arrivals need more.
+        let w4 = allen_cunneen_wq(0.6, 4.0, 4, 30.0, 1.5).unwrap();
+        assert!(w4 > 10.0, "{w4}");
+        assert_eq!(pick_slots(0.6, 4.0, 30.0, 1.5, &s), Some(5));
+        // Beyond max_slots: none.
+        let tight = PickSettings { max_slots: 2, ..s };
+        assert_eq!(pick_slots(0.6, 4.0, 3.19, 1.5, &tight), None);
+    }
+
+    #[test]
+    fn batches_pay_off_only_under_load() {
+        let s = PickSettings::default();
+        // A quiet lane, 2/h at 5 min: batching only adds the wait to fill the batch.
+        let (b, l) = pick_batch(2.0 / 60.0, 5.0, 2.0, 1.5, 0.2, &s).unwrap();
+        assert_eq!(b, 1);
+        close(
+            l,
+            5.0 + kingman_wq(2.0 / 60.0, 5.0, 2.0, 1.5).unwrap(),
+            1e-9,
+        );
+        // A lane past its capacity, 14/h at 5 min (ρ = 1.17): one at a time overloads, batches of a few carry it.
+        assert_eq!(batch_latency(14.0 / 60.0, 5.0, 2.0, 1.5, 0.05, 1), None);
+        let (b, _) = pick_batch(14.0 / 60.0, 5.0, 2.0, 1.5, 0.05, &s).unwrap();
+        assert!(b >= 2, "{b}");
     }
 }

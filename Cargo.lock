@@ -242,6 +242,8 @@ dependencies = [
  "choreograph",
  "choreographd",
  "clap",
+ "clap_complete",
+ "serde",
  "serde_json",
  "tokio",
 ]
