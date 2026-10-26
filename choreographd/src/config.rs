@@ -34,9 +34,9 @@
 //! node_stale = "2m"
 //!
 //! [[client]]
-//! name = "build-1"
+//! name = "node-a"
 //! token_sha256 = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
-//! report = ["build-1"]  # the nodes it may report; "*" for any
+//! report = ["node-a"]  # the nodes it may report; "*" for any
 //! ```
 //!
 //! Durations are written like `1h30m` or as milliseconds. Unknown keys are refused, so a typo is an error,
@@ -523,8 +523,8 @@ mod tests {
         assert!(c.kinds.is_empty() && c.clients.is_empty());
         // Without tokens a caller names itself, `local` by default, and may report any node.
         assert_eq!(c.caller(None, None).unwrap().name, "local");
-        let n = c.caller(Some("ignored"), Some("core-1/lander")).unwrap();
-        assert_eq!(n.name, "core-1/lander");
+        let n = c.caller(Some("ignored"), Some("node-b/lander")).unwrap();
+        assert_eq!(n.name, "node-b/lander");
         assert!(n.may_report("anything"));
         assert!(c.caller(None, Some("two words")).is_none());
         assert!(c.caller(None, Some("")).is_none());

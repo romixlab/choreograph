@@ -11,7 +11,7 @@
 //! use choreographd::api::{NeedSpec, SubmitJob};
 //! use choreographd::client::Client;
 //!
-//! let c = Client::unix("/run/choreographd/api.sock").named("build-1");
+//! let c = Client::unix("/run/choreographd/api.sock").named("node-a");
 //! let job = c
 //!     .submit(&SubmitJob {
 //!         name: "gate".into(),

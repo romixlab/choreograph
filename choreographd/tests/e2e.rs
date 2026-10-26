@@ -575,11 +575,11 @@ async fn without_tokens_callers_name_themselves() {
     .unwrap();
     let svc = Svc::with(Daemon::open(c, Clock::new(T0)).unwrap());
     let local = Client::local(svc.router.clone());
-    let (a, b) = (local.named("core-1/a"), local.named("core-2/b"));
+    let (a, b) = (local.named("node-b/a"), local.named("node-c/b"));
     // Any caller may report any node.
     b.report("node-9", &room(&[("gate", 1)])).await.unwrap();
     let ja = a.submit(&gate("gate a")).await.unwrap();
-    assert_eq!(ja.client, "core-1/a");
+    assert_eq!(ja.client, "node-b/a");
     let jl = local.submit(&gate("gate local")).await.unwrap();
     assert_eq!(jl.client, "local");
     assert_eq!(code(b.cancel(ja.id).await.unwrap_err()), "forbidden");

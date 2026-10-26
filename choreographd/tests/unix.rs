@@ -32,7 +32,7 @@ async fn the_service_answers_on_its_socket() {
         std::time::Duration::from_secs(10),
     ));
 
-    let c = Client::unix(&sock).named("build-1");
+    let c = Client::unix(&sock).named("node-a");
     assert!(
         c.health()
             .await
@@ -47,14 +47,14 @@ async fn the_service_answers_on_its_socket() {
         ..Default::default()
     };
     r.room.insert("gate".into(), 1);
-    c.report("build-1", &r).await.unwrap();
+    c.report("node-a", &r).await.unwrap();
     let j: choreographd::api::SubmitJob = serde_json::from_value(serde_json::json!({
         "name": "on the socket",
         "needs": [{"kind": "gate", "amount": 1}],
     }))
     .unwrap();
     let v = c.submit(&j).await.unwrap();
-    assert_eq!((v.state, v.client.as_str()), (JobState::Running, "build-1"));
+    assert_eq!((v.state, v.client.as_str()), (JobState::Running, "node-a"));
     server.abort();
 
     // Something else at the socket's path is not touched.

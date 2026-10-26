@@ -44,7 +44,7 @@ and trusts whoever may open it, which is decided by the socket's file mode: a ca
 `Choreograph-Client` header. Machines reach it through a proxy that carries single requests (a mesh): every
 call is one request and one answer, and a wait is held at most its `timeout`, or answers at once with
 `timeout=0`. Without such a proxy the service listens on TCP with TLS (rustls, no C) and one bearer token per
-client (`tokens = true`; `choreographd token build-1 --report build-1` makes a token and its `[[client]]`
+client (`tokens = true`; `choreographd token node-a --report node-a` makes a token and its `[[client]]`
 block); a listener beyond loopback is refused without both.
 
 | Call | Path |

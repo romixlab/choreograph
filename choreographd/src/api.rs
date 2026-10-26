@@ -72,7 +72,7 @@ pub struct NeedSpec {
     /// How much; 1 when missing.
     #[serde(default = "one")]
     pub amount: u64,
-    /// Exactly this resource (`build-1/ram`, or a shared one such as `tpm/main`, made on first use).
+    /// Exactly this resource (`node-a/ram`, or a shared one such as `repo/main`, made on first use).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
     /// Only on this node.

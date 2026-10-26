@@ -42,9 +42,9 @@ max_wait = "60s"
 
 # `choreographd token NAME --report NODE` makes a token and prints a block like these.
 [[client]]
-name = "build-1"
+name = "node-a"
 token_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
-report = ["build-1"]
+report = ["node-a"]
 
 [[client]]
 name = "lander"
