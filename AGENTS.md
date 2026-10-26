@@ -98,7 +98,9 @@ Cargo workspace, edition 2024, one shared version.
 
 - `just` lists the recipes; `just test`, `just lint`, `just install` (build and put `choreograph` and
   `choreographd` on PATH),
-  `just deploy` (bring this checkout up to main and install).
+  `just deploy` (bring this checkout up to main and install), `just dist OUT` (a static musl `choreographd` for
+  `tpm dist build` on a build node; the PC that runs the service pulls and installs it with `tpm dist pull
+  --install`, and root copies it into /usr/local/bin on `tpm provision approve`).
 - `choreograph --version` shows the version, the git SHA and the commit time.
 
 ## Commits
