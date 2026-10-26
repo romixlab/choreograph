@@ -63,7 +63,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::live::Live;
-use crate::model::{GroupId, Job, JobId, Labels, ModelError, NodeId, Remap, Resource, ResourceId};
+use crate::model::{
+    GroupId, Job, JobId, KindId, Labels, ModelError, NodeId, Remap, Resource, ResourceId, Unit,
+};
 use crate::plan::{Plan, Planner};
 use crate::policy::dur;
 use crate::state::{Assignment, JobStatus, LostJobs, Outcome, StateError};
@@ -201,6 +203,13 @@ pub enum Op {
     SubmitGroup {
         name: String,
         jobs: Vec<Job>,
+    },
+    AddKind {
+        name: String,
+        unit: Unit,
+    },
+    SetSettings {
+        settings: LeaseSettings,
     },
     AddNode {
         name: String,
@@ -511,6 +520,23 @@ impl Authority {
         Ok(ids)
     }
 
+    /// Replaces the lease settings (a new TTL from the configuration after a restart). Leases held keep their
+    /// expiry until their next heartbeat, which uses the new TTL.
+    pub fn set_settings(&mut self, settings: LeaseSettings) -> Result<(), LeaseError> {
+        settings.check()?;
+        self.settings = settings.clone();
+        self.log(Op::SetSettings { settings });
+        Ok(())
+    }
+
+    /// See [`Live::add_kind`].
+    pub fn add_kind(&mut self, name: impl Into<String>, unit: Unit) -> Result<KindId, LeaseError> {
+        let name = name.into();
+        let k = self.live.add_kind(name.clone(), unit)?;
+        self.log(Op::AddKind { name, unit });
+        Ok(k)
+    }
+
     /// See [`Live::add_node`].
     pub fn add_node(
         &mut self,
@@ -662,6 +688,8 @@ impl Authority {
             Op::Snapshot { .. } => unreachable!("handled by replay"),
             Op::Submit { job } => self.submit(job).map(drop)?,
             Op::SubmitGroup { name, jobs } => self.submit_group(name, jobs).map(drop)?,
+            Op::AddKind { name, unit } => self.add_kind(name, unit).map(drop)?,
+            Op::SetSettings { settings } => self.set_settings(settings)?,
             Op::AddNode {
                 name,
                 labels,
@@ -782,6 +810,44 @@ mod tests {
 
     fn job(auth: &Authority, name: &str) -> JobId {
         auth.live().model().job_by_name(name).unwrap()
+    }
+
+    #[test]
+    fn kinds_and_settings_added_later_are_journaled() {
+        let Fleet { mut auth, .. } = fleet(ttl30());
+        let gate = auth.add_kind("gate", Unit::Count).unwrap();
+        assert!(matches!(
+            auth.add_kind("gate", Unit::Count),
+            Err(LeaseError::Model(ModelError::Duplicate { .. }))
+        ));
+        let na = auth.live().model().node_by_name("a").unwrap();
+        auth.add_resource(Resource {
+            name: "a/gate".into(),
+            kind: gate,
+            node: na,
+            capacity: 2,
+            labels: Labels::new(),
+            states: None,
+        })
+        .unwrap();
+        let ttl = LeaseSettings {
+            ttl: Dur::secs(90),
+            ..LeaseSettings::default()
+        };
+        assert!(
+            auth.set_settings(LeaseSettings {
+                ttl: Dur::ZERO,
+                ..ttl.clone()
+            })
+            .is_err()
+        );
+        auth.set_settings(ttl.clone()).unwrap();
+        auth.submit(Job::new("g").needs(gate, 2)).unwrap();
+        let l = grant(&mut auth).remove(0);
+        assert_eq!(l.expires, at(90));
+        let again = Authority::replay(auth.take_journal()).unwrap();
+        assert_eq!(again, auth);
+        assert_eq!(again.settings(), &ttl);
     }
 
     #[test]

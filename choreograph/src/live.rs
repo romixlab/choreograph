@@ -10,7 +10,7 @@
 //!   nothing new starts there and the running jobs keep what they hold;
 //! - [`Live::set_node_up`] takes a node out of placement (or back), [`Live::node_lost`] drops the jobs that ran
 //!   on a node that is gone;
-//! - [`Live::add_node`] and [`Live::add_resource`] grow the fleet, [`Live::set_node_labels`] and
+//! - [`Live::add_kind`], [`Live::add_node`] and [`Live::add_resource`] grow the fleet, [`Live::set_node_labels`] and
 //!   [`Live::set_node_policy`] change what a node offers and which work it keeps away (see [`Node::policy`]);
 //! - [`Live::compact`] removes finished jobs, so memory stays bounded however long it runs.
 //!
@@ -50,8 +50,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::metrics::{Collector, Metrics, MetricsConfig};
 use crate::model::{
-    GroupId, Job, JobId, Labels, Model, ModelError, Node, NodeId, Phase, Remap, Resource,
-    ResourceId,
+    GroupId, Job, JobId, Kind, KindId, Labels, Model, ModelError, Node, NodeId, Phase, Remap,
+    Resource, ResourceId, Unit,
 };
 use crate::plan::{Plan, Planner};
 use crate::state::{Assignment, JobStatus, LostJobs, Outcome, State, StateError};
@@ -238,6 +238,14 @@ impl Live {
         })?;
         self.state.grow(&self.model);
         Ok(n)
+    }
+
+    /// Adds a resource kind; resources of it can be added from then on.
+    pub fn add_kind(&mut self, name: impl Into<String>, unit: Unit) -> Result<KindId, ModelError> {
+        self.model.add_kind(Kind {
+            name: name.into(),
+            unit,
+        })
     }
 
     /// Adds a resource with its declared capacity; it is free and in its initial state.

@@ -5,6 +5,12 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Added
+
+- `Live::add_kind` and `Authority::add_kind`: a resource kind added at runtime; `Authority::set_settings`
+  replaces the lease settings (a new TTL after a restart). Both are journaled (`Op::AddKind`,
+  `Op::SetSettings`) (CORE-5, EXEC-1).
+
 ## [0.3.0] - 2026-10-26
 
 ### Added

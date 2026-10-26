@@ -452,6 +452,17 @@ impl Model {
         Ok(NodeId(self.nodes.len() as u32 - 1))
     }
 
+    pub(crate) fn add_kind(&mut self, kind: Kind) -> Result<KindId, ModelError> {
+        if self.kinds.iter().any(|k| k.name == kind.name) {
+            return Err(ModelError::Duplicate {
+                what: "kind",
+                name: kind.name,
+            });
+        }
+        self.kinds.push(kind);
+        Ok(KindId(self.kinds.len() as u32 - 1))
+    }
+
     pub(crate) fn add_resource(&mut self, r: Resource) -> Result<ResourceId, ModelError> {
         if self.resources.iter().any(|x| x.name == r.name) {
             return Err(ModelError::Duplicate {
