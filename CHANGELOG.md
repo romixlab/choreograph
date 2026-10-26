@@ -5,6 +5,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-10-26
+
 ### Added
 
 - `just dist OUT`: a static musl `choreographd` bundle for `tpm dist build` on a build node, so the PC that runs
