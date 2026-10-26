@@ -47,6 +47,10 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   C, M/M/c, Allen–Cunneen, Cobham's priority formula, lognormal fit from p50/p90, speculation yield, aging
   overtake time (`theory.rs`).
 
+- 🚧 **THEORY-2 slots-and-batches**: done: the two-state MMPP's rate and index of dispersion, gate runs per
+  entry of batched gates with bisection (`theory.rs`). Planned: picking gate slots and the batch size for the
+  worst of several traffic profiles.
+
 ## PLAN: planners
 
 - ✅ **PLAN-1 list-scheduler**: `ListScheduler` (`list.rs`): effective priority = max(class + aging, deadline
@@ -86,6 +90,14 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   Allen–Cunneen, Little and Cobham fed with the measured inputs. `Live::measure` measures a live model as it
   runs, `Live::record_events` records its trace (format version 2: requeues, capacities, node up and down,
   compactions).
+
+- ✅ **SIM-4 mmpp-arrivals**: regime-switching arrivals (`Arrivals::Mmpp`, `sim/workload.rs`): Poisson at the
+  current regime's rate, exponential stays, the next regime drawn uniformly from the others; `Arrivals::mmpp2`
+  for a busy and a quiet regime. A long run matches the theory's rate and index of dispersion
+  (`theory::mmpp2_rate`, `mmpp2_idc`).
+- 📋 **SIM-5 recordings-and-profiles**: a recording (model, trace, tags) of real history; per group of
+  recordings the traffic profile (λ, c_a², E[S], c_s², failure rate, hourly burstiness, a two-regime MMPP fit,
+  measured waits).
 
 ## TEST: property tests
 

@@ -5,6 +5,13 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Added
+
+- Regime-switching arrivals in the simulator: `Arrivals::Mmpp` (a Markov-modulated Poisson process over
+  `Regime`s, each a rate and a mean stay) and `Arrivals::mmpp2` for busy and quiet stretches (SIM-4).
+- `theory::mmpp2_rate` and `theory::mmpp2_idc` (the long-run rate and index of dispersion of a two-state MMPP)
+  and `theory::batch_runs_per_entry` (gate runs per entry of batched gates with bisection) (THEORY-2).
+
 ## [0.3.2] - 2026-10-26
 
 ### Added

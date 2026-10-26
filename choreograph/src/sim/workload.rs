@@ -64,6 +64,20 @@ pub enum Arrivals {
     Renewal { gap: Dist, count: usize },
     /// Arrivals at recorded times (trace replay); each picks a template by weight.
     Replay { times: Vec<Time> },
+    /// A Markov-modulated Poisson process (regime switching): `count` arrivals from `start`, Poisson at the
+    /// current regime's rate; a regime lasts an exponential time with its mean stay, then the process moves to
+    /// one of the other regimes, each equally likely. It starts in `regimes[0]`. Busy and quiet stretches of a
+    /// day: two regimes are the usual fit.
+    Mmpp { regimes: Vec<Regime>, count: usize },
+}
+
+/// One regime of [`Arrivals::Mmpp`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Regime {
+    /// Arrivals per hour while in it (0: none).
+    pub per_hour: f64,
+    /// Mean time spent in it per visit.
+    pub mean_stay: Dur,
 }
 
 impl Arrivals {
@@ -82,6 +96,30 @@ impl Arrivals {
     pub fn renewal(mean_gap: Dur, ca2: f64, count: usize) -> Arrivals {
         Arrivals::Renewal {
             gap: Dist::with_cs2(mean_gap, ca2),
+            count,
+        }
+    }
+
+    /// Two regimes: busy at `busy_per_hour` for `busy_stay` on average, quiet at `quiet_per_hour` for
+    /// `quiet_stay`, starting busy.
+    pub fn mmpp2(
+        busy_per_hour: f64,
+        busy_stay: Dur,
+        quiet_per_hour: f64,
+        quiet_stay: Dur,
+        count: usize,
+    ) -> Arrivals {
+        Arrivals::Mmpp {
+            regimes: vec![
+                Regime {
+                    per_hour: busy_per_hour,
+                    mean_stay: busy_stay,
+                },
+                Regime {
+                    per_hour: quiet_per_hour,
+                    mean_stay: quiet_stay,
+                },
+            ],
             count,
         }
     }
@@ -113,6 +151,10 @@ pub struct Workload {
 pub enum WorkloadError {
     #[error("no templates (or all with weight 0) for generated arrivals")]
     NoTemplates,
+    #[error(
+        "regime-switching arrivals need regimes with rates >= 0, at least one above 0, and stays > 0"
+    )]
+    Regimes,
     #[error("template {0:?} has dependencies or a group; generated jobs must stand alone")]
     Linked(String),
     #[error(transparent)]
@@ -152,6 +194,7 @@ impl Workload {
                     .collect()
             }
             Arrivals::Replay { times } => times.clone(),
+            Arrivals::Mmpp { regimes, count } => mmpp_times(regimes, *count, self.start, seed)?,
         };
         let total: u64 = self.templates.iter().map(|t| t.weight as u64).sum();
         if total == 0 && !times.is_empty() {
@@ -192,6 +235,51 @@ impl Workload {
             durations,
         })
     }
+}
+
+/// The arrival times of a regime-switching process, from the [`Purpose::Arrivals`] stream: per step one draw
+/// for the gap to the next arrival at the current rate and, on entering a regime, one for its stay and one for
+/// the next regime. Times are kept in fractional milliseconds and rounded once.
+fn mmpp_times(
+    regimes: &[Regime],
+    count: usize,
+    start: Time,
+    seed: u64,
+) -> Result<Vec<Time>, WorkloadError> {
+    let ok = !regimes.is_empty()
+        && regimes
+            .iter()
+            .all(|r| r.per_hour.is_finite() && r.per_hour >= 0.0 && r.mean_stay.0 > 0)
+        && regimes.iter().any(|r| r.per_hour > 0.0);
+    if !ok {
+        return Err(WorkloadError::Regimes);
+    }
+    let mut rng = stream(seed, Purpose::Arrivals, 0, 0);
+    let exp = |rng: &mut _, mean: f64| -libm::log(unit(rng)) * mean;
+    let mut t = start.0 as f64;
+    let mut at = 0usize;
+    let mut leave = t + exp(&mut rng, regimes[0].mean_stay.0 as f64);
+    let mut times = Vec::with_capacity(count);
+    while times.len() < count {
+        let r = &regimes[at];
+        let next = if r.per_hour > 0.0 {
+            t + exp(&mut rng, 3_600_000.0 / r.per_hour)
+        } else {
+            f64::INFINITY
+        };
+        if next < leave {
+            t = next;
+            times.push(Time(libm::round(t) as i64));
+        } else {
+            t = leave;
+            if regimes.len() > 1 {
+                let k = (unit(&mut rng) * (regimes.len() - 1) as f64) as usize;
+                at = if k >= at { k + 1 } else { k }.min(regimes.len() - 1);
+            }
+            leave = t + exp(&mut rng, regimes[at].mean_stay.0 as f64);
+        }
+    }
+    Ok(times)
 }
 
 /// A template by weight (one uniform draw per arrival).
@@ -320,5 +408,49 @@ mod tests {
             start: Time::ZERO,
         };
         assert!(matches!(w.build(&m, 0), Err(WorkloadError::Linked(_))));
+    }
+
+    #[test]
+    fn mmpp_matches_its_rate_and_dispersion() {
+        let (m, slot) = base();
+        // Busy 10/h for 2 h, quiet 1/h for 6 h: λ̄ = 3.25/h, index of dispersion 15.0.
+        let w = Workload {
+            templates: vec![Template {
+                job: Job::new("j").needs(slot, 1),
+                weight: 1,
+                dists: PhaseDists::default(),
+            }],
+            arrivals: Arrivals::mmpp2(10.0, Dur::secs(7200), 1.0, Dur::secs(6 * 3600), 200_000),
+            start: Time::ZERO,
+        };
+        let g = w.build(&m, 5).unwrap();
+        let t: Vec<i64> = g.model.jobs().iter().map(|j| j.arrival.0).collect();
+        assert!(t.windows(2).all(|w| w[0] <= w[1]));
+        let hours = *t.last().unwrap() as f64 / 3_600_000.0;
+        let rate = t.len() as f64 / hours;
+        assert!((rate / 3.25 - 1.0).abs() < 0.03, "rate {rate}");
+        // Counts in 48 h windows: their variance over their mean nears the asymptotic index.
+        let win = 48 * 3_600_000;
+        let mut counts = vec![0f64; (t.last().unwrap() / win) as usize];
+        for x in &t {
+            if let Some(c) = counts.get_mut((x / win) as usize) {
+                *c += 1.0;
+            }
+        }
+        let n = counts.len() as f64;
+        let mean = counts.iter().sum::<f64>() / n;
+        let var = counts.iter().map(|c| (c - mean).powi(2)).sum::<f64>() / n;
+        let idc = crate::theory::mmpp2_idc(10.0, 1.0, 0.5, 1.0 / 6.0);
+        assert!(
+            (var / mean / idc - 1.0).abs() < 0.2,
+            "idc {} vs {idc}",
+            var / mean
+        );
+        assert_eq!(w.build(&m, 5).unwrap(), g, "same seed, same times");
+        let bad = Workload {
+            arrivals: Arrivals::mmpp2(0.0, Dur::secs(1), 0.0, Dur::secs(1), 3),
+            ..w
+        };
+        assert!(matches!(bad.build(&m, 0), Err(WorkloadError::Regimes)));
     }
 }

@@ -78,7 +78,7 @@ use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
 pub use dist::{Dist, DistError};
-pub use workload::{Arrivals, Generated, PhaseDists, Template, Workload, WorkloadError};
+pub use workload::{Arrivals, Generated, PhaseDists, Regime, Template, Workload, WorkloadError};
 
 use crate::cache::{ResultCache, Verdict};
 use crate::model::{JobId, Model, Phase};

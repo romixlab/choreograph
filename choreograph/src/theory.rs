@@ -134,6 +134,36 @@ pub fn aging_overtake(gap: f64, alpha: f64) -> f64 {
     gap / alpha
 }
 
+/// A two-state Markov-modulated Poisson process (MMPP): arrivals at `rate1` while in state 1 and `rate2` in
+/// state 2, leaving state 1 at rate `r1` and state 2 at rate `r2` (one over the mean stay). The long-run
+/// arrival rate λ̄ = (λ₁r₂ + λ₂r₁)/(r₁ + r₂).
+pub fn mmpp2_rate(rate1: f64, rate2: f64, r1: f64, r2: f64) -> f64 {
+    (rate1 * r2 + rate2 * r1) / (r1 + r2)
+}
+
+/// The asymptotic index of dispersion of counts of a two-state MMPP, Var N(t)/E N(t) as t → ∞:
+/// I = 1 + 2(λ₁ − λ₂)²r₁r₂/((r₁ + r₂)³·λ̄). A Poisson process has I = 1; regimes that switch slowly between
+/// busy and quiet give I ≫ 1. In heavy traffic I takes the place of c_a² in Kingman and Allen–Cunneen.
+pub fn mmpp2_idc(rate1: f64, rate2: f64, r1: f64, r2: f64) -> f64 {
+    let mean = mmpp2_rate(rate1, rate2, r1, r2);
+    if mean <= 0.0 {
+        return 1.0;
+    }
+    1.0 + 2.0 * (rate1 - rate2).powi(2) * r1 * r2 / ((r1 + r2).powi(3) * mean)
+}
+
+/// Batched gates with bisection: entries tested together in batches of `b`, each failing independently with
+/// probability `p`. A green batch costs one run; a red one is split in half and each half tested, recursing,
+/// about 2·log₂ b more runs to find one culprit. Gate runs per entry ≈ (1 + (1 − (1 − p)^b)·2·log₂ b)/b; 1 for
+/// b = 1.
+pub fn batch_runs_per_entry(p: f64, b: u32) -> f64 {
+    if b <= 1 {
+        return 1.0;
+    }
+    let bf = b as f64;
+    (1.0 + (1.0 - (1.0 - p).powi(b as i32)) * 2.0 * bf.log2()) / bf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +270,28 @@ mod tests {
         close(little_l(3.9 / 60.0, 9.3), 0.6045, 1e-4);
         close(aging_overtake(2.0, 1.0), 2.0, 1e-12);
         close(utilisation(36.0, 4.0 / 60.0, 3), 0.8, 1e-12);
+    }
+
+    #[test]
+    fn mmpp2_reduces_to_poisson_and_grows_with_contrast() {
+        // Equal rates: a Poisson process.
+        close(mmpp2_rate(3.0, 3.0, 0.5, 0.5), 3.0, 1e-12);
+        close(mmpp2_idc(3.0, 3.0, 0.5, 0.5), 1.0, 1e-12);
+        // Busy 10/h for 2 h, quiet 1/h for 6 h: λ̄ = (10·1/6 + 1·1/2)/(2/3) = 3.25/h.
+        let (r1, r2) = (0.5, 1.0 / 6.0);
+        close(mmpp2_rate(10.0, 1.0, r1, r2), 3.25, 1e-12);
+        // I = 1 + 2·81·(1/12)/((2/3)³·3.25) = 15.02.
+        close(mmpp2_idc(10.0, 1.0, r1, r2), 15.02, 0.01);
+    }
+
+    #[test]
+    fn batched_gate_runs_per_entry() {
+        close(batch_runs_per_entry(0.22, 1), 1.0, 1e-12);
+        // b = 2: (1 + 0.3916·2)/2 = 0.892; b = 4: (1 + 0.6298·4)/4 = 0.880.
+        close(batch_runs_per_entry(0.22, 2), 0.892, 0.001);
+        close(batch_runs_per_entry(0.22, 4), 0.880, 0.001);
+        // b = 8: fewer runs still, but a red batch takes 2·log₂ 8 = 6 more rounds; at p = 0.05 far fewer.
+        close(batch_runs_per_entry(0.22, 8), 0.772, 0.001);
+        close(batch_runs_per_entry(0.05, 8), 0.377, 0.001);
     }
 }
