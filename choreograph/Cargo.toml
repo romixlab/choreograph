@@ -22,3 +22,6 @@ toml = { workspace = true, optional = true }
 rand_core.workspace = true
 rand_chacha.workspace = true
 libm.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

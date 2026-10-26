@@ -5,6 +5,18 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Added
+
+- Leases (`lease.rs`): `Authority` grants every start as a `Lease` with a fencing `Token`, a TTL and
+  heartbeats (`Beat::stop` tells the holder of a cancel); `release` ends it with an outcome, `expire` gives an
+  expired lease's resources back and requeues or fails its job (`LeaseSettings`, loadable from TOML); stale or
+  expired tokens are refused; `check_holds` and `fence` guard work outside the authority (EXEC-1).
+- The lease journal: every accepted change is an `Entry` (inputs and time, starting with a snapshot), taken
+  with `take_journal`; `Authority::replay` rebuilds the same authority after a restart and refuses a newer
+  version or a journal whose tokens diverge (EXEC-1).
+- `State::finish` and `State::abandon` (with `Live` wrappers): a running job ends at once with an outcome, or
+  is given up without its cleanup and requeued or failed (EXEC-1).
+
 ## [0.2.0] - 2026-10-26
 
 ### Added

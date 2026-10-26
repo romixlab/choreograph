@@ -47,7 +47,7 @@ use crate::model::{
     GroupId, Job, JobId, Labels, Model, ModelError, Node, NodeId, Remap, Resource, ResourceId,
 };
 use crate::plan::{Plan, Planner};
-use crate::state::{Assignment, JobStatus, LostJobs, State, StateError};
+use crate::state::{Assignment, JobStatus, LostJobs, Outcome, State, StateError};
 use crate::time::Time;
 
 /// A model and its state that change together at runtime.
@@ -184,6 +184,16 @@ impl Live {
         self.state.fail(j)
     }
 
+    /// See [`State::finish`].
+    pub fn finish(&mut self, j: JobId, outcome: Outcome) -> Result<(), StateError> {
+        self.state.finish(&self.model, j, outcome)
+    }
+
+    /// See [`State::abandon`].
+    pub fn abandon(&mut self, j: JobId, then: LostJobs) -> Result<(), StateError> {
+        self.state.abandon(&self.model, j, then)
+    }
+
     /// See [`State::cancel`].
     pub fn cancel(&mut self, j: JobId) -> Result<(), StateError> {
         self.state.cancel(j)
@@ -206,7 +216,6 @@ mod tests {
     use super::*;
     use crate::model::{Estimate, KindId, ModelBuilder, Unit};
     use crate::plan::{FirstFit, WaitReason};
-    use crate::state::Outcome;
     use crate::time::Dur;
     use crate::{ListScheduler, Policy};
 

@@ -105,6 +105,8 @@ pub enum StateError {
     GroupSplit { job: JobId },
     #[error("job {0:?} is started twice in one batch")]
     Twice(JobId),
+    #[error("{0:?} is not how a run ends (ok, failed or cancelled)")]
+    NotARunOutcome(Outcome),
 }
 
 /// The runtime state of a model.
@@ -306,27 +308,36 @@ impl State {
             })
             .collect();
         for &j in &hit {
-            let JobStatus::Running { ending, .. } = self.status[j.index()] else {
-                continue;
-            };
-            self.release(model, j);
-            self.running.remove(&j);
-            self.status[j.index()] = match (ending, then) {
-                (Outcome::Ok, LostJobs::Requeue) => {
-                    self.queued.insert(j);
-                    JobStatus::Queued
-                }
-                (Outcome::Ok, LostJobs::Fail) => JobStatus::Done {
-                    at: self.now,
-                    outcome: Outcome::Failed,
-                },
-                (e, _) => JobStatus::Done {
-                    at: self.now,
-                    outcome: e,
-                },
-            };
+            self.abandon(model, j, then)
+                .expect("a job in the running index is running");
         }
         hit
+    }
+
+    /// A running job is given up without its cleanup (its holder is gone: the node was lost, its lease
+    /// expired): it releases all it holds at once and goes back to the queue or ends `Failed`, as `then` says.
+    /// A job that was already ending failed or cancelled ends so.
+    pub fn abandon(&mut self, model: &Model, j: JobId, then: LostJobs) -> Result<(), StateError> {
+        let JobStatus::Running { ending, .. } = self.status[j.index()] else {
+            return Err(StateError::NotRunning(j));
+        };
+        self.release(model, j);
+        self.running.remove(&j);
+        self.status[j.index()] = match (ending, then) {
+            (Outcome::Ok, LostJobs::Requeue) => {
+                self.queued.insert(j);
+                JobStatus::Queued
+            }
+            (Outcome::Ok, LostJobs::Fail) => JobStatus::Done {
+                at: self.now,
+                outcome: Outcome::Failed,
+            },
+            (e, _) => JobStatus::Done {
+                at: self.now,
+                outcome: e,
+            },
+        };
+        Ok(())
     }
 
     /// Who holds a resource and how much, in job id order.
@@ -543,6 +554,30 @@ impl State {
             }
         }
         Ok(&self.status[j.index()])
+    }
+
+    /// A running job ends now, in whatever phase it is, with `outcome` (its holder ran setup, run and cleanup
+    /// itself and reports how it went): it releases what it holds. A job already ending failed or cancelled
+    /// keeps that outcome. Only `Ok`, `Failed` and `Cancelled` end a run.
+    pub fn finish(&mut self, model: &Model, j: JobId, outcome: Outcome) -> Result<(), StateError> {
+        if !matches!(outcome, Outcome::Ok | Outcome::Failed | Outcome::Cancelled) {
+            return Err(StateError::NotARunOutcome(outcome));
+        }
+        let JobStatus::Running { ending, .. } = self.status[j.index()] else {
+            return Err(StateError::NotRunning(j));
+        };
+        let outcome = if ending == Outcome::Ok {
+            outcome
+        } else {
+            ending
+        };
+        self.release(model, j);
+        self.running.remove(&j);
+        self.status[j.index()] = JobStatus::Done {
+            at: self.now,
+            outcome,
+        };
+        Ok(())
     }
 
     /// The running job failed in setup or run: it goes straight to cleanup and will end `Failed`. A failure

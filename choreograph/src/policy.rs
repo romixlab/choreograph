@@ -155,7 +155,7 @@ impl DurText {
     }
 }
 
-mod dur {
+pub(crate) mod dur {
     use super::*;
 
     pub fn serialize<S: serde::Serializer>(d: &Dur, s: S) -> Result<S::Ok, S::Error> {
@@ -169,7 +169,7 @@ mod dur {
     }
 }
 
-mod opt_dur {
+pub(crate) mod opt_dur {
     use super::*;
 
     pub fn serialize<S: serde::Serializer>(d: &Option<Dur>, s: S) -> Result<S::Ok, S::Error> {

@@ -46,6 +46,9 @@ Cargo workspace, edition 2024, one shared version.
   - `live.rs`: `Live`, a model and its state that change at runtime: jobs submitted and compacted (ids
     renumbered in order), capacities set from measurements, nodes added, up, down or lost, labels and policy
     labels changed.
+  - `lease.rs`: `Authority`, the one authority over a `Live`: every start a lease with a fencing token, a
+    TTL and heartbeats, released with an outcome or expired; an append-only journal of every accepted change,
+    replayed to rebuild the same state after a restart.
   - `plan.rs`: the `Planner` trait, `Plan` (starts, reservations, wait reasons), `WaitReason`, and `Fifo`, the
     first-fit baseline planner.
   - `list.rs`: `ListScheduler`, the main planner: effective priority (class, aging, deadline urgency), placement

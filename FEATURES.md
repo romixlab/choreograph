@@ -25,8 +25,14 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   or lost (their jobs requeued or failed), with `NodesDown` as a wait reason; finished jobs compacted with
   dense ids renumbered in order. `State` and both planners read the measured capacity and node state, and the
   list scheduler's profile counts a shortfall until it clears.
-- 📋 **EXEC-1 executor-state-machine**: leases with fencing tokens, saga cleanup from every state, an append-only
-  journal and recovery to safe states, a watchdog per phase, interlocks the planner cannot bypass.
+- 🚧 **EXEC-1 executor-state-machine**: done: leases (`lease.rs`): `Authority` owns a `Live` and grants every
+  start as a lease with a fencing token (never reused, rising), a TTL and heartbeats (which also tell the holder
+  of a cancel); a release with the outcome ends it, an expiry gives the job's resources back and requeues or
+  fails it (`LeaseSettings`), and a stale or expired token is refused everywhere; `check_holds` and `fence` for
+  work outside that must happen once (a push to `main`); every accepted change is journaled (append-only
+  `Entry`s, starting with a snapshot) and `Authority::replay` rebuilds the same state after a restart, checking
+  the recorded tokens. Planned: saga cleanup from every state and recovery of resources to safe states, a
+  watchdog per phase, interlocks the planner cannot bypass.
 - 📋 **EXEC-2 realtime-driver**: drive the executor state machine in real time (threads or an async runtime).
 - ✅ **CACHE-1 result-cache**: results keyed by a SHA-256 hash of a canonical encoding of the job name and its
   inputs, validity windows (expiries such as a calibration, a max age), verdicts (pass and fail are results;

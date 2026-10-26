@@ -12,6 +12,9 @@
 //! - [`state`]: the runtime bookkeeping; [`State::start`] applies a batch of starts all or nothing.
 //! - [`live`]: [`Live`], a model and state that change at runtime: jobs submitted and compacted, capacities
 //!   measured, nodes up, down or lost, labels changed.
+//! - [`lease`]: [`Authority`], the one authority over a live model: every start a [`Lease`] with a fencing
+//!   [`Token`], a TTL and heartbeats, released with an outcome or expired; an append-only journal of every
+//!   change, replayed to rebuild the same state after a restart.
 //! - [`plan`]: the [`Planner`] trait, [`Plan`], [`WaitReason`] and the [`FirstFit`] baseline.
 //! - [`cache`]: the result cache: a job with unchanged inputs and a valid result is not run again.
 //! - [`list`]: [`ListScheduler`], the main planner: priorities with aging and deadline urgency, placement,
@@ -57,6 +60,7 @@ pub mod cache;
 pub mod estimates;
 #[cfg(feature = "toml")]
 pub mod jobset;
+pub mod lease;
 pub mod list;
 pub mod live;
 pub mod model;
@@ -69,6 +73,7 @@ pub mod time;
 pub mod trace;
 
 pub use estimates::{EstimateKey, EstimateSettings, Estimates, Learner, Quantiles};
+pub use lease::{Authority, Beat, Entry, Lease, LeaseError, LeaseSettings, Op, Token};
 pub use list::{Eta, Forecast, ListScheduler, Span};
 pub use live::Live;
 pub use model::{
