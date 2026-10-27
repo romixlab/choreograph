@@ -303,16 +303,38 @@ impl Live {
 
     /// See [`State::start`].
     pub fn start(&mut self, batch: &[(JobId, Assignment)]) -> Result<(), StateError> {
+        let resumed: Vec<bool> = batch
+            .iter()
+            .map(|(j, _)| self.state.is_paused(*j))
+            .collect();
         self.state.start(&self.model, batch)?;
         if self.observed() {
-            for (job, a) in batch {
-                self.emit(Event::Started {
-                    job: *job,
-                    assignment: a.clone(),
+            for ((job, a), r) in batch.iter().zip(resumed) {
+                self.emit(if r {
+                    Event::Resumed { job: *job }
+                } else {
+                    Event::Started {
+                        job: *job,
+                        assignment: a.clone(),
+                    }
                 });
             }
         }
         Ok(())
+    }
+
+    /// See [`State::pause`].
+    pub fn pause(&mut self, j: JobId) -> Result<(), StateError> {
+        self.state.pause(&self.model, j)?;
+        if self.observed() {
+            self.emit(Event::Paused { job: j });
+        }
+        Ok(())
+    }
+
+    /// See [`State::resume`].
+    pub fn resume(&mut self, j: JobId) -> Result<(), StateError> {
+        self.state.resume(j)
     }
 
     /// See [`State::advance`].

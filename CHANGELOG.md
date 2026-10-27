@@ -5,6 +5,25 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Added
+
+- Open-ended jobs (`Job::open`) and job kinds (`Job::kind`): planned with their estimate while young and from
+  their age once older (`theory::lognormal_conditional_quantile`, `theory::normal_cdf`,
+  `theory::normal_quantile`), never sooner than `Policy::open_floor` from now (CORE-6).
+- Pause and resume (`State::pause`, `State::resume`, `Live`, `Authority::pause`, `Authority::resume`): a paused
+  job gives back what its `pause_keeps` does not name and claims no future time; a resume waits for the same
+  resources and goes on under the same lease; trace events `paused` and `resumed` (CORE-6).
+- `Preempt::Ask`: the planner asks a running job to give way for one at least `Policy::preempt_gap` classes
+  higher (`Plan::give_way`, `Authority::ask_give_way`, `Lease::give_way`, `Beat::give_way`) (CORE-6).
+- Durations learned per job kind from releases (`Authority::learned`, `Learner::observe_kind`,
+  `Learner::estimate_kind`; `Learner` is now serializable) (CORE-6).
+- Job-set keys `kind`, `open`, `pause_keeps`; the example `examples/hil_open.toml` (CORE-6).
+
+### Changed
+
+- **Breaking:** `JobStatus::Running` has a `paused` field, `Beat` a `give_way` field, `Plan` a `give_way` map,
+  `Policy` the settings `open_floor` and `preempt_gap` (CORE-6).
+
 ## [0.3.4] - 2026-10-26
 
 ### Added

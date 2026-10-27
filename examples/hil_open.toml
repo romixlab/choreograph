@@ -1,0 +1,66 @@
+# A HIL bench shared by a person debugging and the tests queued behind them. The debug session and the soak
+# test are open-ended: no time limit, they hold what they need until their holder releases them. Their `run`
+# is a guess (learned per kind in a running service): plans assume it while they are young and predict again
+# from their age once they run longer. The debug session may be asked to give way to a more important test
+# (`preempt = "ask"`); when the person pauses, the probe and supply go to the tests and the logger channel
+# stays with the session (`pause_keeps`).
+
+[[node]]
+name = "bench"
+
+[[kind]]
+name = "probe"
+
+[[kind]]
+name = "supply"
+
+[[kind]]
+name = "logger"
+
+[[resource]]
+name = "probe"
+kind = "probe"
+node = "bench"
+
+[[resource]]
+name = "supply"
+kind = "supply"
+node = "bench"
+states = ["off", "3V3"]
+safe = "off"
+transitions = [{ to = "off", dur = "100ms" }, { to = "3V3", dur = "1s" }]
+
+[[resource]]
+name = "logger"
+kind = "logger"
+node = "bench"
+capacity = 4
+
+[[job]]
+name = "debug"
+kind = "debug"
+open = true
+run = { p50 = "40m", p90 = "2h" }
+needs = [{ kind = "probe" }, { kind = "supply", state = "3V3" }, { kind = "logger" }]
+preempt = "ask"
+pause_keeps = ["logger"]
+
+[[job]]
+name = "soak"
+kind = "soak"
+open = true
+run = { p50 = "8h", p90 = "12h" }
+needs = [{ kind = "logger", amount = 2 }]
+
+[[job]]
+name = "regression"
+needs = [{ kind = "probe" }, { kind = "supply", state = "3V3" }]
+run = { p50 = "8m", p90 = "12m" }
+class = 2
+arrival = "5m"
+
+[[job]]
+name = "logger-smoke"
+needs = [{ kind = "logger", amount = 2 }]
+run = "5m"
+arrival = "5m"

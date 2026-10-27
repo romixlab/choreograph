@@ -119,6 +119,109 @@ pub fn lognormal_from_p50_p90(p50: f64, p90: f64) -> LogNormal {
     }
 }
 
+/// The standard normal's distribution function Φ(z), from the complementary error function (Numerical
+/// Recipes' `erfcc`, relative error below 1.2·10⁻⁷ everywhere).
+pub fn normal_cdf(z: f64) -> f64 {
+    let x = -z / std::f64::consts::SQRT_2;
+    let t = 1.0 / (1.0 + 0.5 * x.abs());
+    let poly = -x * x - 1.265_512_23
+        + t * (1.000_023_68
+            + t * (0.374_091_96
+                + t * (0.096_784_18
+                    + t * (-0.186_288_06
+                        + t * (0.278_868_07
+                            + t * (-1.135_203_98
+                                + t * (1.488_515_87 + t * (-0.822_152_23 + t * 0.170_872_77))))))));
+    let erfc = t * poly.exp();
+    let erfc = if x >= 0.0 { erfc } else { 2.0 - erfc };
+    0.5 * erfc
+}
+
+/// The standard normal's quantile Φ⁻¹(p) for 0 < p < 1 (Acklam's rational approximation and one Newton step
+/// on [`normal_cdf`]); ±∞ at 0 and 1.
+pub fn normal_quantile(p: f64) -> f64 {
+    if p <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if p >= 1.0 {
+        return f64::INFINITY;
+    }
+    const A: [f64; 6] = [
+        -3.969_683_028_665_376e1,
+        2.209_460_984_245_205e2,
+        -2.759_285_104_469_687e2,
+        1.383_577_518_672_69e2,
+        -3.066_479_806_614_716e1,
+        2.506_628_277_459_239,
+    ];
+    const B: [f64; 5] = [
+        -5.447_609_879_822_406e1,
+        1.615_858_368_580_409e2,
+        -1.556_989_798_598_866e2,
+        6.680_131_188_771_972e1,
+        -1.328_068_155_288_572e1,
+    ];
+    const C: [f64; 6] = [
+        -7.784_894_002_430_293e-3,
+        -3.223_964_580_411_365e-1,
+        -2.400_758_277_161_838,
+        -2.549_732_539_343_734,
+        4.374_664_141_464_968,
+        2.938_163_982_698_783,
+    ];
+    const D: [f64; 4] = [
+        7.784_695_709_041_462e-3,
+        3.224_671_290_700_398e-1,
+        2.445_134_137_142_996,
+        3.754_408_661_907_416,
+    ];
+    let tail = |q: f64| {
+        (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
+    };
+    let low = 0.024_25;
+    let x = if p < low {
+        tail((-2.0 * p.ln()).sqrt())
+    } else if p > 1.0 - low {
+        -tail((-2.0 * (1.0 - p).ln()).sqrt())
+    } else {
+        let q = p - 0.5;
+        let r = q * q;
+        (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
+            / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
+    };
+    // One Newton step against the CDF: x − (Φ(x) − p)/φ(x).
+    let pdf = (-x * x / 2.0).exp() / (2.0 * std::f64::consts::PI).sqrt();
+    if pdf > 0.0 {
+        x - (normal_cdf(x) - p) / pdf
+    } else {
+        x
+    }
+}
+
+/// The `q` quantile of a duration that has already lasted `age`, for a lognormal fitted to `p50` and `p90`:
+/// the t with P(T > t | T > age) = 1 − q. At age 0 it is the plain quantile; it grows with the age, so a job
+/// that runs long is predicted to run longer still (the honest guess for heavy-tailed work such as sessions).
+/// `None` when the fit is degenerate (p50 ≤ 0 or p90 = p50) or the age lies so far in the tail that the
+/// survival underflows; the caller then falls back to its own rule.
+pub fn lognormal_conditional_quantile(p50: f64, p90: f64, age: f64, q: f64) -> Option<f64> {
+    if p50 <= 0.0 || p90 <= p50 || !(0.0..1.0).contains(&q) {
+        return None;
+    }
+    let mu = p50.ln();
+    let sigma = (p90 / p50).ln() / Z90;
+    let survive = if age <= 0.0 {
+        1.0
+    } else {
+        1.0 - normal_cdf((age.ln() - mu) / sigma)
+    };
+    if survive < 1e-12 {
+        return None;
+    }
+    let z = normal_quantile(1.0 - (1.0 - q) * survive);
+    z.is_finite().then(|| (mu + sigma * z).exp().max(age))
+}
+
 /// Speculative checks (merge trains) at depth `k` with an independent failure probability `p` per entry: the
 /// share of gate runs whose result is used, (1 − (1 − p)^k)/(k·p).
 pub fn speculation_useful_fraction(p: f64, k: u32) -> f64 {
@@ -233,6 +336,43 @@ pub fn pick_batch(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn normal_cdf_and_quantile() {
+        assert!((normal_cdf(0.0) - 0.5).abs() < 1e-7);
+        assert!((normal_cdf(1.959_964) - 0.975).abs() < 1e-6);
+        assert!((normal_cdf(-Z90) - 0.1).abs() < 1e-6);
+        for p in [1e-6, 0.01, 0.1, 0.5, 0.9, 0.975, 0.999_999] {
+            assert!(
+                (normal_cdf(normal_quantile(p)) - p).abs() < 1e-7 * p.max(1e-3) * 10.0,
+                "p = {p}"
+            );
+        }
+        assert!((normal_quantile(0.9) - Z90).abs() < 1e-6);
+    }
+
+    #[test]
+    fn conditional_quantile_grows_with_age() {
+        // A session with p50 1 h, p90 3 h (σ = ln 3 / z₀.₉ = 0.857).
+        let (p50, p90) = (60.0, 180.0);
+        let at0 = lognormal_conditional_quantile(p50, p90, 0.0, 0.9).unwrap();
+        assert!((at0 - 180.0).abs() < 1e-3, "{at0}");
+        let med0 = lognormal_conditional_quantile(p50, p90, 0.0, 0.5).unwrap();
+        assert!((med0 - 60.0).abs() < 1e-3);
+        // Worked: at age 3 h the survival is 0.1, so the p90 given it is the unconditional p99:
+        // 60·e^{σ·2.3263} = 60·3^{2.3263/1.2816} = 60·7.33 = 440 min.
+        let at3h = lognormal_conditional_quantile(p50, p90, 180.0, 0.9).unwrap();
+        assert!((at3h - 440.0).abs() < 1.5, "{at3h}");
+        let mut last = 0.0;
+        for age in [0.0, 30.0, 60.0, 120.0, 240.0, 480.0] {
+            let t = lognormal_conditional_quantile(p50, p90, age, 0.9).unwrap();
+            assert!(t > last && t > age, "age {age}: {t}");
+            last = t;
+        }
+        assert_eq!(lognormal_conditional_quantile(60.0, 60.0, 10.0, 0.9), None);
+        assert_eq!(lognormal_conditional_quantile(60.0, 180.0, 1e9, 0.9), None);
+    }
+
     use super::*;
 
     fn close(a: f64, b: f64, tol: f64) {

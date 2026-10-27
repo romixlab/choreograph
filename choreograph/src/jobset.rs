@@ -42,6 +42,15 @@
 //! due = "2h"
 //! group = "change-42"                  # jobs of a group start together
 //! p_fail = 0.2                         # for the simulator
+//!
+//! [[job]]
+//! name = "debug"
+//! kind = "debug"                       # durations are learned per kind
+//! open = true                          # no time limit: holds until released, run is a guess
+//! run = { p50 = "1h", p90 = "3h" }
+//! preempt = "ask"                      # never (default), at_phase_boundary, ask
+//! pause_keeps = ["supply"]             # kinds a pause keeps; the rest is given back
+//! needs = [{ kind = "supply" }]
 //! ```
 //!
 //! Amounts follow the kind's unit: `count` takes integers, `bytes` takes `10.7GiB`, `500MB`, `1024`, and
@@ -196,6 +205,11 @@ struct JobT {
     p_fail: f64,
     #[serde(default)]
     p_flake: f64,
+    kind: Option<String>,
+    #[serde(default)]
+    open: bool,
+    #[serde(default)]
+    pause_keeps: Vec<String>,
 }
 
 /// Parses a job set from TOML text into a validated [`Model`].
@@ -351,6 +365,15 @@ pub fn from_toml(text: &str) -> Result<Model, JobSetError> {
         if let Some(g) = &j.group {
             groups.entry(g.clone()).or_default().push(JobId(i as u32));
         }
+        let mut pause_keeps = Vec::new();
+        for k in &j.pause_keeps {
+            pause_keeps.push(
+                kinds
+                    .get(k)
+                    .ok_or_else(|| unknown(&ctx, "kind (pause_keeps)", k))?
+                    .0,
+            );
+        }
         b.job(Job {
             name: j.name.clone(),
             needs,
@@ -372,6 +395,9 @@ pub fn from_toml(text: &str) -> Result<Model, JobSetError> {
                 p_fail: j.p_fail,
                 p_flake: j.p_flake,
             },
+            kind: j.kind.clone(),
+            open: j.open,
+            pause_keeps,
         });
     }
     for (name, members) in groups {

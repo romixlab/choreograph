@@ -68,10 +68,10 @@ use std::ops::Bound::Excluded;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{JobId, Model, Need, NodeId, Phase, ResourceId};
+use crate::model::{Estimate, JobId, Model, Need, NodeId, Phase, Preempt, ResourceId};
 use crate::plan::{
     Plan, Planner, Reservation, Start, WaitReason, capacity_reason, find_assignment,
-    precondition_reason,
+    precondition_reason, resume_needs, resume_reason,
 };
 use crate::policy::{Backfill, Placement, Policy, Quantile};
 use crate::state::{Assignment, JobStatus, State};
@@ -226,15 +226,12 @@ impl ListScheduler {
         // The estimated end of each running job's current phase.
         let mut phase_end: BTreeMap<JobId, Time> = BTreeMap::new();
         for j in state.running() {
-            if let JobStatus::Running {
-                started,
-                phase,
-                phase_since,
-                ..
-            } = state.status(j)
-            {
+            if let JobStatus::Running { started, .. } = state.status(j) {
                 starts.insert(j, *started);
-                phase_end.insert(j, (*phase_since + phase_dur(j, *phase)).max(state.now()));
+                // A paused job has no phase end until it resumes.
+                if let Some(end) = self.phase_end(model, state, j, q) {
+                    phase_end.insert(j, end);
+                }
             }
         }
         let mut out = BTreeMap::new();
@@ -247,6 +244,13 @@ impl ListScheduler {
                 break;
             }
             for st in &plan.starts {
+                if starts.contains_key(&st.job) {
+                    // A resume: it goes on in its phase.
+                    if let Some(end) = self.phase_end(model, &s, st.job, q) {
+                        phase_end.insert(st.job, end);
+                    }
+                    continue;
+                }
                 starts.insert(st.job, now);
                 phase_end.insert(st.job, now + phase_dur(st.job, Phase::Setup));
             }
@@ -278,6 +282,213 @@ impl ListScheduler {
             }
         }
         out
+    }
+
+    /// When a running job is estimated to end at a quantile; `None` while it is paused (it no longer claims
+    /// any future time: what it keeps stays held, with no end). A bounded job: its current phase at its
+    /// estimate (or now, if overrun), then the later phases. An open-ended job outside cleanup: from its age,
+    /// at least [`Policy::open_floor`] from now.
+    pub fn est_end(&self, model: &Model, state: &State, j: JobId, q: Quantile) -> Option<Time> {
+        if state.is_paused(j) {
+            return None;
+        }
+        self.end_if_running(model, state, j, q)
+    }
+
+    /// [`est_end`](ListScheduler::est_end) as if the job were not paused (a resume from now on).
+    fn end_if_running(&self, model: &Model, state: &State, j: JobId, q: Quantile) -> Option<Time> {
+        let JobStatus::Running {
+            phase,
+            phase_since,
+            started,
+            ..
+        } = state.status(j)
+        else {
+            return None;
+        };
+        let job = model.job(j);
+        let now = state.now();
+        if job.open && *phase != Phase::Cleanup {
+            let p = &job.phases;
+            let (p50, p90) = (p.total_p50(), p.total_p90());
+            let age = now - *started;
+            let qv = match q {
+                Quantile::P50 => 0.5,
+                Quantile::P90 => 0.9,
+            };
+            let t = crate::theory::lognormal_conditional_quantile(
+                p50.as_ms() as f64,
+                p90.as_ms() as f64,
+                age.as_ms() as f64,
+                qv,
+            )
+            .map_or(q.of(Estimate { p50, p90 }), |t| Dur(t.round() as i64));
+            return Some((*started + t).max(now + self.policy.open_floor));
+        }
+        let phases = &job.phases;
+        let mut end = (*phase_since + q.of(phases.get(*phase))).max(now);
+        for p in Phase::ALL.iter().filter(|p| **p > *phase) {
+            end += q.of(phases.get(*p));
+        }
+        Some(end)
+    }
+
+    /// When a running job's current phase is estimated to end: its end less the later phases.
+    fn phase_end(&self, model: &Model, state: &State, j: JobId, q: Quantile) -> Option<Time> {
+        let end = self.est_end(model, state, j, q)?;
+        let JobStatus::Running { phase, .. } = state.status(j) else {
+            return None;
+        };
+        let later: Dur = Phase::ALL
+            .iter()
+            .filter(|p| **p > *phase)
+            .map(|p| q.of(model.job(j).phases.get(*p)))
+            .sum();
+        Some((end - later).max(state.now()))
+    }
+
+    /// Paused jobs that asked to resume, before the queue: each takes back what it gave up on the resources it
+    /// ran on, if that fits for its estimated rest next to this round's starts; else it waits (with a
+    /// reservation as the backfilling mode allows, like a queued job).
+    fn plan_resumes(
+        &self,
+        model: &Model,
+        state: &State,
+        busy: &mut Profile,
+        full: &mut Profile,
+        plan: &mut Plan,
+    ) {
+        let now = state.now();
+        let q = self.policy.reserve_with;
+        let mut resuming: Vec<JobId> = state.resuming().collect();
+        resuming.sort_by_key(|j| (std::cmp::Reverse(self.priority(model, now, *j)), *j));
+        for j in resuming {
+            let parts = resume_needs(model, state, j);
+            let end = self
+                .end_if_running(model, state, j, q)
+                .unwrap_or(now)
+                .max(now + Dur(1));
+            let JobStatus::Running { assignment, .. } = state.status(j) else {
+                continue;
+            };
+            let fits = |p: &Profile, at: Time| {
+                let free = p.window(at, at + (end - now));
+                let mut want: BTreeMap<ResourceId, u64> = BTreeMap::new();
+                for (_, r, a) in &parts {
+                    *want.entry(*r).or_default() += a;
+                }
+                want.iter().all(|(r, a)| free[r.index()] >= *a)
+            };
+            if fits(full, now) {
+                busy.hold_parts(&parts, now, end);
+                full.hold_parts(&parts, now, end);
+                plan.starts.push(Start {
+                    job: j,
+                    assignment: assignment.clone(),
+                });
+                continue;
+            }
+            let mut why = resume_reason(model, state, j, &busy.window(now, now + Dur(1)))
+                .unwrap_or(WaitReason::Resource {
+                    need: parts[0].0,
+                    resource: parts[0].1,
+                    held_by: state.holders(parts[0].1).map(|(h, _)| h).collect(),
+                    free_at: None,
+                });
+            if let WaitReason::Resource {
+                need,
+                resource,
+                free_at,
+                ..
+            } = &mut why
+            {
+                let amount = model.job(j).needs[*need].amount;
+                *free_at = busy.earliest_free(*resource, amount, now);
+            }
+            plan.waits.insert(j, why);
+            let reserve = match self.policy.backfill {
+                Backfill::Off => false,
+                Backfill::Easy => plan.reservations.is_empty(),
+                Backfill::Conservative => true,
+            };
+            if reserve
+                && let Some(at) = full
+                    .times()
+                    .into_iter()
+                    .filter(|t| *t > now)
+                    .find(|t| fits(full, *t))
+            {
+                let d = end - now;
+                full.hold_parts(&parts, at, at + d);
+                plan.reservations.push(Reservation {
+                    job: j,
+                    at,
+                    assignment: assignment.clone(),
+                });
+            }
+        }
+    }
+
+    /// The first job (in priority order) that waits for capacity and could start now if some running
+    /// [`Preempt::Ask`] jobs at least [`Policy::preempt_gap`] classes lower gave way: their holders are
+    /// asked, the lowest class first, then the youngest, as few as make it fit. One such job per plan.
+    fn ask_give_way(&self, model: &Model, state: &State, busy: &Profile, plan: &mut Plan) {
+        let Some(gap) = self.policy.preempt_gap else {
+            return;
+        };
+        let now = state.now();
+        let q = self.policy.reserve_with;
+        let mut victims: Vec<(i32, std::cmp::Reverse<Time>, JobId)> = state
+            .running()
+            .filter(|v| model.job(*v).preempt == Preempt::Ask && !state.is_paused(*v))
+            .filter_map(|v| match state.status(v) {
+                JobStatus::Running { phase, started, .. } if *phase != Phase::Cleanup => {
+                    Some((model.job(v).class, std::cmp::Reverse(*started), v))
+                }
+                _ => None,
+            })
+            .collect();
+        if victims.is_empty() {
+            return;
+        }
+        victims.sort();
+        for j in self.order(model, state) {
+            if !matches!(
+                plan.waits.get(&j),
+                Some(
+                    WaitReason::Resource { .. }
+                        | WaitReason::Capacity { .. }
+                        | WaitReason::SameNode { .. }
+                )
+            ) || model.job(j).group.is_some()
+            {
+                continue;
+            }
+            let class = model.job(j).class;
+            let mut p = busy.clone();
+            let mut asked = Vec::new();
+            for &(vclass, _, v) in &victims {
+                if vclass > class - gap {
+                    break;
+                }
+                let (Some(end), JobStatus::Running { assignment, .. }) =
+                    (self.est_end(model, state, v, q), state.status(v))
+                else {
+                    continue;
+                };
+                let end = end.max(now + Dur(1));
+                for (need, r) in model.job(v).needs.iter().zip(&assignment.0) {
+                    p.free_early(*r, end, need.amount);
+                }
+                asked.push(v);
+                if self.place(model, &p, &[j], now).is_some() {
+                    for v in asked {
+                        plan.give_way.insert(v, j);
+                    }
+                    return;
+                }
+            }
+        }
     }
 
     /// The best assignment for job `j` with these free amounts, or `None`.
@@ -465,7 +676,7 @@ impl Planner for ListScheduler {
         );
         for j in state.running() {
             if let (Some(end), JobStatus::Running { assignment, .. }) =
-                (est_end(model, state, j, q), state.status(j))
+                (self.est_end(model, state, j, q), state.status(j))
             {
                 // Still running at `now`, so it frees at the earliest just after.
                 let end = end.max(now + Dur(1));
@@ -475,6 +686,7 @@ impl Planner for ListScheduler {
             }
         }
         let mut full = busy.clone();
+        self.plan_resumes(model, state, &mut busy, &mut full, &mut plan);
         let mut decided: BTreeSet<JobId> = BTreeSet::new();
         for j in self.order(model, state) {
             if decided.contains(&j) {
@@ -544,6 +756,7 @@ impl Planner for ListScheduler {
                 }
             }
         }
+        self.ask_give_way(model, state, &busy, &mut plan);
         plan
     }
 }
@@ -573,23 +786,6 @@ fn hold_dur(model: &Model, j: JobId, q: Quantile) -> Dur {
 /// The p90 work a queued job still has, in ms.
 fn remaining_p90(job: &crate::model::Job) -> i64 {
     job.phases.total_p90().as_ms()
-}
-
-/// When a running job is estimated to end: the current phase at its estimate (or now, if overrun), then the
-/// later phases.
-fn est_end(model: &Model, state: &State, j: JobId, q: Quantile) -> Option<Time> {
-    let JobStatus::Running {
-        phase, phase_since, ..
-    } = state.status(j)
-    else {
-        return None;
-    };
-    let phases = &model.job(j).phases;
-    let mut end = (*phase_since + q.of(phases.get(*phase))).max(state.now());
-    for p in Phase::ALL.iter().filter(|p| **p > *phase) {
-        end += q.of(phases.get(*p));
-    }
-    Some(end)
 }
 
 fn clamp_i64(x: i128) -> i64 {
@@ -624,6 +820,21 @@ impl Profile {
             *d.entry(from).or_default() -= need.amount as i64;
             *d.entry(until).or_default() += need.amount as i64;
         }
+    }
+
+    /// Parts of a job's needs, (need index, resource, amount), held over [from, until).
+    fn hold_parts(&mut self, parts: &[(usize, ResourceId, u64)], from: Time, until: Time) {
+        for (_, r, amount) in parts {
+            let d = &mut self.deltas[r.index()];
+            *d.entry(from).or_default() -= *amount as i64;
+            *d.entry(until).or_default() += *amount as i64;
+        }
+    }
+
+    /// An amount planned to free at `end` frees now instead.
+    fn free_early(&mut self, r: ResourceId, end: Time, amount: u64) {
+        self.free[r.index()] += amount as i64;
+        *self.deltas[r.index()].entry(end).or_default() -= amount as i64;
     }
 
     fn at(&self, r: usize, t: Time) -> i64 {

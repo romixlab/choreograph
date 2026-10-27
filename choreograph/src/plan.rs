@@ -83,6 +83,10 @@ pub struct Plan {
     pub waits: BTreeMap<JobId, WaitReason>,
     /// The planner wants to be asked again at this time even if nothing else happens (a release time).
     pub wake_at: Option<Time>,
+    /// Running jobs whose holders are asked to give way (pause or release; see
+    /// [`Preempt::Ask`](crate::model::Preempt::Ask)), each with the job it would make room for.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub give_way: BTreeMap<JobId, JobId>,
 }
 
 impl Plan {
@@ -225,6 +229,53 @@ pub fn capacity_reason(model: &Model, state: &State, j: JobId, free: &[u64]) -> 
     WaitReason::SameNode { tag }
 }
 
+/// What a paused job that asked to resume takes back: (need index, resource, amount) for every need it gave
+/// up, in need order; empty for any other job. The resources are the ones it ran on.
+pub fn resume_needs(model: &Model, state: &State, j: JobId) -> Vec<(usize, ResourceId, u64)> {
+    let JobStatus::Running {
+        assignment,
+        paused: Some(p),
+        ..
+    } = state.status(j)
+    else {
+        return Vec::new();
+    };
+    if !p.resume {
+        return Vec::new();
+    }
+    model
+        .job(j)
+        .needs
+        .iter()
+        .zip(&assignment.0)
+        .zip(&p.held)
+        .enumerate()
+        .filter(|(_, (_, h))| !**h)
+        .map(|(i, ((n, r), _))| (i, *r, n.amount))
+        .collect()
+}
+
+/// Why a resume does not fit with these free amounts (the first need it gave back that does not fit, held by
+/// whom), `None` when it fits.
+pub fn resume_reason(model: &Model, state: &State, j: JobId, free: &[u64]) -> Option<WaitReason> {
+    let mut left = free.to_vec();
+    for (i, r, amount) in resume_needs(model, state, j) {
+        if left[r.index()] < amount {
+            if !state.node_up(model.resource(r).node) {
+                return Some(WaitReason::NodesDown { need: i });
+            }
+            return Some(WaitReason::Resource {
+                need: i,
+                resource: r,
+                held_by: state.holders(r).map(|(h, _)| h).collect(),
+                free_at: None,
+            });
+        }
+        left[r.index()] -= amount;
+    }
+    None
+}
+
 /// Why job `j` cannot start for reasons other than resources (release time, dependencies), if any.
 pub fn precondition_reason(model: &Model, state: &State, j: JobId) -> Option<WaitReason> {
     let job = model.job(j);
@@ -250,6 +301,25 @@ impl Planner for FirstFit {
     fn plan(&mut self, model: &Model, state: &State) -> Plan {
         let mut plan = Plan::default();
         let mut free = state.free_all(model);
+        // Resumes first: their holders are already at work and come back to what they gave up.
+        for j in state.resuming() {
+            match resume_reason(model, state, j, &free) {
+                Some(why) => {
+                    plan.waits.insert(j, why);
+                }
+                None => {
+                    for (_, r, amount) in resume_needs(model, state, j) {
+                        free[r.index()] -= amount;
+                    }
+                    if let JobStatus::Running { assignment, .. } = state.status(j) {
+                        plan.starts.push(Start {
+                            job: j,
+                            assignment: assignment.clone(),
+                        });
+                    }
+                }
+            }
+        }
         let mut order: Vec<JobId> = state.queued().collect();
         order.sort_by_key(|j| (model.job(*j).arrival, *j));
         let mut decided: BTreeSet<JobId> = BTreeSet::new();

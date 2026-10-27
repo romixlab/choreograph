@@ -62,9 +62,11 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::estimates::Learner;
 use crate::live::Live;
 use crate::model::{
-    GroupId, Job, JobId, KindId, Labels, ModelError, NodeId, Remap, Resource, ResourceId, Unit,
+    Estimate, GroupId, Job, JobId, KindId, Labels, ModelError, NodeId, Phase, Remap, Resource,
+    ResourceId, Unit,
 };
 use crate::plan::{Plan, Planner};
 use crate::policy::dur;
@@ -94,6 +96,10 @@ pub struct Lease {
     pub granted: Time,
     /// When it is lost unless a heartbeat comes first: from this time on, its token is refused.
     pub expires: Time,
+    /// The planner asks the holder to give way (pause or release) for a more important job; its heartbeats
+    /// say so ([`Beat::give_way`]) until it pauses, resumes or ends.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub give_way: bool,
 }
 
 /// The settings of the leases.
@@ -145,6 +151,10 @@ pub struct Beat {
     pub expires: Time,
     /// The job was cancelled or marked failed: the holder stops it, cleans up and releases.
     pub stop: bool,
+    /// A more important job waits for what this one holds: the holder pauses or releases when it can (see
+    /// [`Preempt::Ask`](crate::model::Preempt::Ask)). Nothing is taken from it.
+    #[serde(default)]
+    pub give_way: bool,
 }
 
 /// Why a call was refused. A refused call changes nothing.
@@ -267,6 +277,16 @@ pub enum Op {
     Expire {
         tokens: Vec<Token>,
     },
+    Pause {
+        token: Token,
+    },
+    Resume {
+        token: Token,
+    },
+    /// Holders asked to give way.
+    GiveWay {
+        jobs: Vec<JobId>,
+    },
 }
 
 /// The one authority over a live model: grants leases, keeps them, and journals every change.
@@ -280,6 +300,9 @@ pub struct Authority {
     next: Token,
     /// The newest token each resource was granted with, indexed by resource id.
     fence: Vec<Option<Token>>,
+    /// Durations learned per job kind from every release (see [`Authority::learned`]).
+    #[serde(default)]
+    learned: Learner,
     /// Entries not yet taken by the caller.
     #[serde(skip)]
     journal: Vec<Entry>,
@@ -293,6 +316,7 @@ impl PartialEq for Authority {
             && self.leases == o.leases
             && self.next == o.next
             && self.fence == o.fence
+            && self.learned == o.learned
     }
 }
 
@@ -315,6 +339,7 @@ impl Authority {
             leases: Vec::new(),
             next: Token(1),
             fence,
+            learned: Learner::default(),
             journal: Vec::new(),
         };
         let s = a.snapshot();
@@ -382,7 +407,13 @@ impl Authority {
     pub fn check_holds(&self, token: Token, r: ResourceId) -> Result<&Lease, LeaseError> {
         let l = self.check(token)?;
         let holds = match self.live.state().status(l.job) {
-            JobStatus::Running { assignment, .. } => assignment.0.contains(&r),
+            JobStatus::Running {
+                assignment, paused, ..
+            } => assignment
+                .0
+                .iter()
+                .enumerate()
+                .any(|(i, x)| *x == r && paused.as_ref().is_none_or(|p| p.held[i])),
             _ => false,
         };
         if !holds {
@@ -397,13 +428,32 @@ impl Authority {
     }
 
     /// Starts a batch (all or none, see [`State::start`](crate::State::start)) and grants each start a lease,
-    /// in batch order. Returns the leases.
+    /// in batch order; a resume of a paused job goes on under the lease it has. Returns the leases.
     pub fn grant(&mut self, batch: &[(JobId, Assignment)]) -> Result<Vec<Lease>, LeaseError> {
+        let resumes: Vec<Option<usize>> = batch
+            .iter()
+            .map(|(j, _)| {
+                self.live
+                    .state()
+                    .is_paused(*j)
+                    .then(|| self.leases.iter().position(|l| l.job == *j))
+                    .flatten()
+            })
+            .collect();
         self.live.start(batch)?;
         let now = self.now();
         self.fence.resize(self.live.model().resources().len(), None);
         let mut granted = Vec::with_capacity(batch.len());
-        for (job, a) in batch {
+        for ((job, a), resume) in batch.iter().zip(resumes) {
+            if let Some(i) = resume {
+                // A resume goes on under its lease: same token, a fresh expiry. The fence of what it takes back
+                // stays at the newest token (kinds whose writes are fenced belong in `pause_keeps`).
+                let l = &mut self.leases[i];
+                l.expires = now + self.settings.ttl;
+                l.give_way = false;
+                granted.push(l.clone());
+                continue;
+            }
             let token = self.next;
             self.next = Token(token.0 + 1);
             for r in &a.0 {
@@ -414,6 +464,7 @@ impl Authority {
                 job: *job,
                 granted: now,
                 expires: now + self.settings.ttl,
+                give_way: false,
             };
             self.leases.push(l.clone());
             granted.push(l);
@@ -435,8 +486,13 @@ impl Authority {
             self.live.state().status(self.leases[i].job),
             JobStatus::Running { ending, .. } if *ending != Outcome::Ok
         );
+        let give_way = self.leases[i].give_way;
         self.log(Op::Heartbeat { token });
-        Ok(Beat { expires, stop })
+        Ok(Beat {
+            expires,
+            stop,
+            give_way,
+        })
     }
 
     /// The holder finished the job's current phase (see [`State::advance`](crate::State::advance)); after
@@ -466,8 +522,67 @@ impl Authority {
         let job = self.check(token)?.job;
         self.live.finish(job, outcome)?;
         let l = self.drop_lease(token);
+        if let (Some(kind), Some(Outcome::Ok)) = (
+            &self.live.model().job(job).kind,
+            self.live.state().outcome(job),
+        ) {
+            let held = self.now() - l.granted;
+            self.learned.observe_kind(kind, Phase::Run, held);
+        }
         self.log(Op::Release { token, outcome });
         Ok(l)
+    }
+
+    /// The holder pauses its job (see [`State::pause`](crate::State::pause)): it keeps its lease and place,
+    /// gives back what it does not keep on pause, and no plan counts on it ending. It still sends heartbeats.
+    pub fn pause(&mut self, token: Token) -> Result<(), LeaseError> {
+        let job = self.check(token)?.job;
+        self.live.pause(job)?;
+        let i = self.find(token)?;
+        self.leases[i].give_way = false;
+        self.log(Op::Pause { token });
+        Ok(())
+    }
+
+    /// The holder of a paused job wants to go on: the job waits for what it gave back on the same resources,
+    /// and a later [`grant`](Authority::grant) of it continues the same lease.
+    pub fn resume(&mut self, token: Token) -> Result<(), LeaseError> {
+        let job = self.check(token)?.job;
+        self.live.resume(job)?;
+        self.log(Op::Resume { token });
+        Ok(())
+    }
+
+    /// Asks the holders of these jobs to give way (a plan's [`give_way`](Plan::give_way)): their heartbeats
+    /// say so. Returns the jobs newly asked; asking again changes nothing.
+    pub fn ask_give_way(&mut self, jobs: impl IntoIterator<Item = JobId>) -> Vec<JobId> {
+        let mut asked = Vec::new();
+        for j in jobs {
+            if let Some(l) = self.leases.iter_mut().find(|l| l.job == j)
+                && !l.give_way
+            {
+                l.give_way = true;
+                asked.push(j);
+            }
+        }
+        if !asked.is_empty() {
+            self.log(Op::GiveWay {
+                jobs: asked.clone(),
+            });
+        }
+        asked
+    }
+
+    /// What a job of this kind is expected to hold its lease for, learned from the releases of earlier jobs of
+    /// the kind that ended well (granted to released, pauses included): the estimate to submit an open-ended
+    /// job with. `None` before the first such release.
+    pub fn learned(&self, kind: &str) -> Option<Estimate> {
+        self.learned
+            .estimate_kind(kind, Phase::Run)
+            .map(|q| Estimate {
+                p50: q.p50,
+                p90: q.p90.max(q.p50),
+            })
     }
 
     /// Ends every lease whose expiry has come: its job gives back what it holds and is requeued or failed as
@@ -715,6 +830,12 @@ impl Authority {
                 let got = self.expire();
                 return Ok(got.iter().map(|l| l.token).eq(tokens));
             }
+            Op::Pause { token } => self.pause(token)?,
+            Op::Resume { token } => self.resume(token)?,
+            Op::GiveWay { jobs } => {
+                let want = jobs.clone();
+                return Ok(self.ask_give_way(jobs) == want);
+            }
         }
         Ok(true)
     }
@@ -865,7 +986,8 @@ mod tests {
             beat,
             Beat {
                 expires: at(50),
-                stop: false
+                stop: false,
+                give_way: false,
             }
         );
         auth.set_now(at(49)).unwrap();

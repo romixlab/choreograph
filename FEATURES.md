@@ -25,6 +25,21 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   or lost (their jobs requeued or failed), with `NodesDown` as a wait reason; finished jobs compacted with
   dense ids renumbered in order. `State` and both planners read the measured capacity and node state, and the
   list scheduler's profile counts a shortfall until it clears.
+- 🚧 **CORE-6 open-ended-jobs**: done in the library: a job may be open-ended (`Job::open`: no time limit, it
+  holds its resources until released: an agent session, a person debugging on a bench, a long soak test) and
+  carry a kind (`Job::kind`); the list scheduler plans it with its estimate while it is young and, once older,
+  with the quantile of a lognormal fitted to its p50 and p90 given its age
+  (`theory::lognormal_conditional_quantile`), never sooner than `Policy::open_floor` from now; a running job
+  pauses (`State::pause`, `Authority::pause`) and gives back every need whose kind is not in its `pause_keeps`,
+  with no claim on future time, and a resume waits for the same resources and goes on under the same lease
+  and token (`resume`, before the queue, with a reservation as backfilling allows); a `Preempt::Ask` job is
+  asked to give way (`Plan::give_way`, `Authority::ask_give_way`, `Beat::give_way`) for a job at least
+  `Policy::preempt_gap` classes higher that fits only without it, and nothing is taken by force; the authority
+  learns how long each kind holds its lease from releases that end well (`Authority::learned`, replayed from the
+  journal); the job-set keys `kind`, `open`, `pause_keeps` and `preempt = "ask"`; the bench example
+  `examples/hil_open.toml`. Tests: `choreograph/tests/open_ended.rs`. Planned: job kinds in `choreographd`
+  (submit, pause, resume, give way, learned estimates) and `choreograph top`; needs learned per kind from
+  reported peaks; metrics that count a pause (a paused job counts as holding all it held).
 - 🚧 **EXEC-1 executor-state-machine**: done: leases (`lease.rs`): `Authority` owns a `Live` and grants every
   start as a lease with a fencing token (never reused, rising), a TTL and heartbeats (which also tell the holder
   of a cancel); a release with the outcome ends it, an expiry gives the job's resources back and requeues or

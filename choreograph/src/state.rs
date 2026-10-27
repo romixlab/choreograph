@@ -63,11 +63,26 @@ pub enum JobStatus {
         phase_since: Time,
         /// How the job will end once cleanup is done: `Ok` unless it failed or was cancelled.
         ending: Outcome,
+        /// Set while the job is paused: it gave back what it does not keep.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        paused: Option<Paused>,
     },
     Done {
         at: Time,
         outcome: Outcome,
     },
+}
+
+/// A running job's pause (see [`State::pause`]): its lease and place stay, but it holds only the needs whose
+/// kind it keeps on pause, and plans no longer count on it ending at any time. A resume asks for the rest back
+/// on the same resources; the planner gives it when it fits, as a start of the job.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Paused {
+    pub since: Time,
+    /// Per need, in the order of `Job::needs`: whether it is still held.
+    pub held: Vec<bool>,
+    /// The holder asked to go on: the job waits for what it gave back.
+    pub resume: bool,
 }
 
 /// Why a change to the state was refused.
@@ -107,6 +122,14 @@ pub enum StateError {
     Twice(JobId),
     #[error("{0:?} is not how a run ends (ok, failed or cancelled)")]
     NotARunOutcome(Outcome),
+    #[error("job {0:?} is paused")]
+    Paused(JobId),
+    #[error("job {0:?} is not paused")]
+    NotPaused(JobId),
+    #[error("job {0:?} is in cleanup and cannot pause")]
+    InCleanup(JobId),
+    #[error("job {0:?} resumes only on the resources it ran on")]
+    ResumeElsewhere(JobId),
 }
 
 /// The runtime state of a model.
@@ -408,9 +431,14 @@ impl State {
         a: &Assignment,
         free: &[u64],
     ) -> Result<Vec<(ResourceId, u64)>, StateError> {
-        match self.status[j.index()] {
+        match &self.status[j.index()] {
             JobStatus::Queued => {}
             JobStatus::Pending => return Err(StateError::NotArrived(j)),
+            JobStatus::Running {
+                assignment,
+                paused: Some(p),
+                ..
+            } if p.resume => return self.check_resume(model, j, assignment, &p.held, a, free),
             _ => return Err(StateError::NotQueued(j)),
         }
         let job = model.job(j);
@@ -466,6 +494,38 @@ impl State {
         Ok(take.into_iter().collect())
     }
 
+    /// A resume takes back the needs it gave up, on the resources it ran on.
+    fn check_resume(
+        &self,
+        model: &Model,
+        j: JobId,
+        had: &Assignment,
+        held: &[bool],
+        a: &Assignment,
+        free: &[u64],
+    ) -> Result<Vec<(ResourceId, u64)>, StateError> {
+        if a != had {
+            return Err(StateError::ResumeElsewhere(j));
+        }
+        let mut take: BTreeMap<ResourceId, u64> = BTreeMap::new();
+        for ((need, r), h) in model.job(j).needs.iter().zip(&a.0).zip(held) {
+            if !h {
+                *take.entry(*r).or_default() += need.amount;
+            }
+        }
+        for (r, want) in &take {
+            let f = free[r.index()];
+            if *want > f {
+                return Err(StateError::OverCapacity {
+                    resource: *r,
+                    want: *want,
+                    free: f,
+                });
+            }
+        }
+        Ok(take.into_iter().collect())
+    }
+
     /// Starts a batch of jobs at the current time, all or none: every job must be queued, past its earliest
     /// start, with its dependencies done, and all of them together must fit. A job of a group may only start in
     /// a batch with every other queued member of its group.
@@ -502,6 +562,15 @@ impl State {
                 self.used[r.index()] += amount;
                 *self.holders[r.index()].entry(*j).or_default() += amount;
             }
+            if let JobStatus::Running { paused, .. } = &mut self.status[j.index()] {
+                let held = paused.take().map(|p| p.held).unwrap_or_default();
+                for ((need, r), h) in model.job(*j).needs.iter().zip(&a.0).zip(held) {
+                    if !h {
+                        self.apply_state(model, need, *r);
+                    }
+                }
+                continue;
+            }
             for (need, r) in model.job(*j).needs.iter().zip(&a.0) {
                 self.apply_state(model, need, *r);
             }
@@ -513,9 +582,95 @@ impl State {
                 started: self.now,
                 phase_since: self.now,
                 ending: Outcome::Ok,
+                paused: None,
             };
         }
         Ok(())
+    }
+
+    /// Pauses a running job: it keeps its place, but gives back every need whose kind is not in its
+    /// `pause_keeps`, and its phase does not move until it resumes. Not in cleanup (that must finish).
+    pub fn pause(&mut self, model: &Model, j: JobId) -> Result<(), StateError> {
+        let now = self.now;
+        let JobStatus::Running {
+            assignment,
+            phase,
+            paused,
+            ..
+        } = &mut self.status[j.index()]
+        else {
+            return Err(StateError::NotRunning(j));
+        };
+        if paused.is_some() {
+            return Err(StateError::Paused(j));
+        }
+        if *phase == Phase::Cleanup {
+            return Err(StateError::InCleanup(j));
+        }
+        let job = model.job(j);
+        let held: Vec<bool> = job
+            .needs
+            .iter()
+            .map(|n| job.pause_keeps.contains(&n.kind))
+            .collect();
+        for ((need, r), h) in job.needs.iter().zip(&assignment.0).zip(&held) {
+            if !h {
+                let ri = r.index();
+                self.used[ri] -= need.amount;
+                let left = self.holders[ri]
+                    .get_mut(&j)
+                    .expect("a running job holds its needs");
+                *left -= need.amount;
+                if *left == 0 {
+                    self.holders[ri].remove(&j);
+                }
+            }
+        }
+        *paused = Some(Paused {
+            since: now,
+            held,
+            resume: false,
+        });
+        Ok(())
+    }
+
+    /// A paused job asks to go on: it waits, as a resume, for the needs it gave back on the same resources;
+    /// the planner starts it when they fit.
+    pub fn resume(&mut self, j: JobId) -> Result<(), StateError> {
+        match &mut self.status[j.index()] {
+            JobStatus::Running {
+                paused: Some(p), ..
+            } => {
+                p.resume = true;
+                Ok(())
+            }
+            JobStatus::Running { .. } => Err(StateError::NotPaused(j)),
+            _ => Err(StateError::NotRunning(j)),
+        }
+    }
+
+    /// Whether a running job is paused.
+    pub fn is_paused(&self, j: JobId) -> bool {
+        matches!(
+            &self.status[j.index()],
+            JobStatus::Running {
+                paused: Some(_),
+                ..
+            }
+        )
+    }
+
+    /// The paused jobs that asked to resume, in id order.
+    pub fn resuming(&self) -> impl Iterator<Item = JobId> + '_ {
+        self.running.iter().copied().filter(|j| {
+            matches!(
+                &self.status[j.index()],
+                JobStatus::Running {
+                    paused: Some(Paused { resume: true, .. }),
+                    ..
+                }
+            )
+        })
     }
 
     fn apply_state(&mut self, model: &Model, need: &Need, r: ResourceId) {
@@ -530,9 +685,18 @@ impl State {
     /// releases the resources and finishes the job. Returns the new status.
     pub fn advance(&mut self, model: &Model, j: JobId) -> Result<&JobStatus, StateError> {
         let now = self.now;
-        let JobStatus::Running { phase, ending, .. } = &mut self.status[j.index()] else {
+        let JobStatus::Running {
+            phase,
+            ending,
+            paused,
+            ..
+        } = &mut self.status[j.index()]
+        else {
             return Err(StateError::NotRunning(j));
         };
+        if paused.is_some() {
+            return Err(StateError::Paused(j));
+        }
         let next = match phase {
             Phase::Setup => Some(Phase::Run),
             Phase::Run => Some(Phase::Cleanup),
@@ -634,11 +798,21 @@ impl State {
 
     fn interrupt(&mut self, j: JobId, why: Outcome) -> Result<(), StateError> {
         let now = self.now;
-        let JobStatus::Running { phase, ending, .. } = &mut self.status[j.index()] else {
+        let JobStatus::Running {
+            phase,
+            ending,
+            paused,
+            ..
+        } = &mut self.status[j.index()]
+        else {
             return Err(StateError::NotRunning(j));
         };
         if *ending == Outcome::Ok {
             *ending = why;
+        }
+        // A paused job cleans up with what it kept; it no longer waits for the rest.
+        if let Some(p) = paused {
+            p.resume = false;
         }
         if *phase != Phase::Cleanup {
             let ending = *ending;

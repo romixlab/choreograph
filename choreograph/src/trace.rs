@@ -31,6 +31,10 @@ pub enum Event {
     Arrived { job: JobId },
     /// The job acquired its resources and began setup.
     Started { job: JobId, assignment: Assignment },
+    /// The running job paused: it gave back what it does not keep on pause.
+    Paused { job: JobId },
+    /// The paused job took back what it gave up and goes on.
+    Resumed { job: JobId },
     /// The job moved into a phase.
     Phase { job: JobId, phase: Phase },
     /// The job failed in a phase (cleanup follows).

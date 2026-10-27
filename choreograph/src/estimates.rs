@@ -41,6 +41,7 @@ pub struct Quantiles {
 
 /// Tunables for learning durations. Every one has a default and this doc line (no bare constants).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EstimateSettings {
     /// EWMA weight on the newest sample (`beta` in `Ŝ ← βS + (1 − β)Ŝ`), in `(0, 1]`; higher adapts faster but
     /// noisier. Default 0.3.
@@ -73,7 +74,7 @@ pub trait Estimates {
     fn estimate(&self, key: &EstimateKey) -> Option<Quantiles>;
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 struct KeyState {
     count: u64,
     ewma_ms: f64,
@@ -147,11 +148,47 @@ fn blend(observed: Quantiles, prior: Quantiles, w: f64) -> Quantiles {
 
 /// Learns durations from observed samples per [`EstimateKey`], blended with priors per job kind and phase for a
 /// cold start.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Learner {
     settings: EstimateSettings,
+    #[serde(with = "pairs")]
     priors: BTreeMap<(String, Phase), Quantiles>,
+    #[serde(with = "pairs")]
     state: BTreeMap<EstimateKey, KeyState>,
+    /// Per job kind and phase wherever it ran: for a job not yet placed (an estimate at submit).
+    #[serde(default, with = "pairs")]
+    anywhere: BTreeMap<(String, Phase), KeyState>,
+}
+
+impl Default for Learner {
+    fn default() -> Learner {
+        Learner::new(EstimateSettings::default())
+    }
+}
+
+/// Maps with non-string keys as lists of pairs, which every serde format can write.
+mod pairs {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<K: Serialize, V: Serialize, S: Serializer>(
+        m: &BTreeMap<K, V>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        s.collect_seq(m.iter())
+    }
+
+    pub fn deserialize<
+        'de,
+        K: Deserialize<'de> + Ord,
+        V: Deserialize<'de>,
+        D: Deserializer<'de>,
+    >(
+        d: D,
+    ) -> Result<BTreeMap<K, V>, D::Error> {
+        Ok(Vec::<(K, V)>::deserialize(d)?.into_iter().collect())
+    }
 }
 
 impl Learner {
@@ -160,6 +197,7 @@ impl Learner {
             settings,
             priors: BTreeMap::new(),
             state: BTreeMap::new(),
+            anywhere: BTreeMap::new(),
         }
     }
 
@@ -185,12 +223,24 @@ impl Learner {
             .or_default()
             .observe(d.as_ms(), &self.settings);
     }
-}
 
-impl Estimates for Learner {
-    fn estimate(&self, key: &EstimateKey) -> Option<Quantiles> {
-        let prior = self.priors.get(&(key.job_kind.clone(), key.phase)).copied();
-        let observed = self.state.get(key);
+    /// Records one observed duration of a job kind's phase wherever it ran (see
+    /// [`estimate_kind`](Learner::estimate_kind)).
+    pub fn observe_kind(&mut self, job_kind: &str, phase: Phase, d: Dur) {
+        self.anywhere
+            .entry((job_kind.to_string(), phase))
+            .or_default()
+            .observe(d.as_ms(), &self.settings);
+    }
+
+    /// The estimate for a job kind's phase wherever it runs, blended with its prior like
+    /// [`Estimates::estimate`]: what a job of that kind is planned with before it is placed.
+    pub fn estimate_kind(&self, job_kind: &str, phase: Phase) -> Option<Quantiles> {
+        let k = (job_kind.to_string(), phase);
+        self.combine(self.anywhere.get(&k), self.priors.get(&k).copied())
+    }
+
+    fn combine(&self, observed: Option<&KeyState>, prior: Option<Quantiles>) -> Option<Quantiles> {
         match (observed, prior) {
             (None, None) => None,
             (None, Some(p)) => Some(p),
@@ -201,6 +251,13 @@ impl Estimates for Learner {
                 data_weight(s.count, &self.settings),
             )),
         }
+    }
+}
+
+impl Estimates for Learner {
+    fn estimate(&self, key: &EstimateKey) -> Option<Quantiles> {
+        let prior = self.priors.get(&(key.job_kind.clone(), key.phase)).copied();
+        self.combine(self.state.get(key), prior)
     }
 }
 

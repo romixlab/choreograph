@@ -12,6 +12,8 @@
 //! reserve_with = "p90"        # p50 or p90: the estimate reservations and backfilling plan with
 //! placement = "best_fit"      # best_fit or least_share
 //! locality = true             # prefer assignments on fewer nodes
+//! open_floor = "5m"           # an open-ended job is always planned to run at least this much longer
+//! preempt_gap = 1             # classes above a Preempt::Ask job that may ask it to give way; "off": never
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -87,6 +89,16 @@ pub struct Policy {
     pub placement: Placement,
     /// Prefer assignments that span fewer nodes before comparing the fit.
     pub locality: bool,
+    /// An open-ended job (`Job::open`) is planned to end at its estimate while it is young, and from its age
+    /// once it runs longer (the quantile of a lognormal fitted to its p50 and p90, given that it has lasted
+    /// so long); never sooner than this from now, so a job past every guess still holds its resources in
+    /// the plan instead of seeming to end at once.
+    #[serde(with = "dur")]
+    pub open_floor: Dur,
+    /// How many classes higher a job that cannot start must be to ask a running `Preempt::Ask` job to give
+    /// way. `None` (`"off"`): never ask.
+    #[serde(with = "opt_gap")]
+    pub preempt_gap: Option<i32>,
 }
 
 impl Default for Policy {
@@ -99,6 +111,8 @@ impl Default for Policy {
             reserve_with: Quantile::P90,
             placement: Placement::BestFit,
             locality: true,
+            open_floor: Dur::mins(5),
+            preempt_gap: Some(1),
         }
     }
 }
@@ -132,6 +146,14 @@ impl Policy {
         }
         if self.deadline_horizon <= Dur::ZERO {
             return Err(PolicyError("deadline_horizon must be positive".into()));
+        }
+        if self.open_floor < Dur::ZERO {
+            return Err(PolicyError("open_floor must not be negative".into()));
+        }
+        if self.preempt_gap.is_some_and(|g| g < 1) {
+            return Err(PolicyError(
+                "preempt_gap must be at least 1 or \"off\"".into(),
+            ));
         }
         Ok(())
     }
@@ -184,6 +206,35 @@ pub(crate) mod opt_dur {
     }
 }
 
+/// A class gap as an integer, or `"off"`.
+pub(crate) mod opt_gap {
+    use super::*;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Gap {
+        N(i32),
+        Text(String),
+    }
+
+    pub fn serialize<S: serde::Serializer>(g: &Option<i32>, s: S) -> Result<S::Ok, S::Error> {
+        match g {
+            Some(g) => s.serialize_i32(*g),
+            None => s.serialize_str("off"),
+        }
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i32>, D::Error> {
+        match Gap::deserialize(d)? {
+            Gap::N(n) => Ok(Some(n)),
+            Gap::Text(t) if t == "off" => Ok(None),
+            Gap::Text(t) => Err(serde::de::Error::custom(format!(
+                "{t:?}: a number of classes or \"off\""
+            ))),
+        }
+    }
+}
+
 #[cfg(all(test, feature = "toml"))]
 mod tests {
     use super::*;
@@ -218,5 +269,15 @@ mod tests {
         assert!(Policy::from_toml("aging_per_class = \"1x\"").is_err());
         assert!(Policy::from_toml("aging_per_class = \"0s\"").is_err());
         assert!(Policy::from_toml("deadline_horizon = \"off\"").is_err());
+        assert_eq!(
+            Policy::from_toml("preempt_gap = \"off\"")
+                .unwrap()
+                .preempt_gap,
+            None
+        );
+        assert!(Policy::from_toml("preempt_gap = 0").is_err());
+        let p = Policy::from_toml("open_floor = \"15m\"\npreempt_gap = 2").unwrap();
+        assert_eq!((p.open_floor, p.preempt_gap), (Dur::mins(15), Some(2)));
+        assert_eq!(Policy::from_toml(&p.to_toml()).unwrap(), p);
     }
 }

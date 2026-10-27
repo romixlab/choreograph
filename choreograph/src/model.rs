@@ -244,6 +244,11 @@ pub enum Preempt {
     Never,
     /// Only between phases.
     AtPhaseBoundary,
+    /// The planner may ask its holder to give way (pause or release) for a job at least
+    /// [`Policy::preempt_gap`](crate::Policy::preempt_gap) classes higher that cannot start otherwise: an
+    /// open-ended session that can checkpoint, a soak test that can stop and go on later. The holder decides
+    /// how; nothing is taken from it by force.
+    Ask,
 }
 
 /// Hints for the simulator: how often the job fails or flakes. Ignored by the planner.
@@ -277,6 +282,20 @@ pub struct Job {
     /// Named content hashes of everything that decides the result (firmware, test version, board), the cache key.
     pub inputs: BTreeMap<String, String>,
     pub sim: SimHints,
+    /// The caller's tag for a recurring kind of work (`session`, `soak`, `gate`): durations are learned per
+    /// kind ([`Authority`](crate::Authority) learns from every release), and policy is set per kind by the caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// An open-ended job has no time limit: it holds its resources until its holder releases it (an agent
+    /// session, a person debugging on a bench, a long soak test). Its phase estimates are a learned guess, not
+    /// a bound: plans assume it ends at that guess while it is young and predict again from its age once it
+    /// runs longer (see [`Policy::open_floor`](crate::Policy::open_floor)).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub open: bool,
+    /// The kinds a pause keeps held (a checkout, a bench's state); every other need is given back while the
+    /// job is paused and taken again on resume. Empty: a pause gives back everything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pause_keeps: Vec<KindId>,
 }
 
 impl Job {
@@ -801,6 +820,9 @@ fn check_jobs(m: &Model, first: usize) -> Result<(), ModelError> {
         for a in &j.after {
             bad("job", a.0, m.jobs.len())?;
         }
+        for k in &j.pause_keeps {
+            bad("kind", k.0, m.kinds.len())?;
+        }
         if let Some(g) = j.group {
             bad("group", g.0, m.groups.len())?;
             if !m.groups[g.index()].members.contains(&JobId(ji as u32)) {
@@ -915,6 +937,9 @@ impl Job {
             preempt: Preempt::Never,
             inputs: BTreeMap::new(),
             sim: SimHints::default(),
+            kind: None,
+            open: false,
+            pause_keeps: Vec::new(),
         }
     }
 
@@ -953,6 +978,23 @@ impl Job {
 
     pub fn due(mut self, t: Time) -> Job {
         self.due = Some(t);
+        self
+    }
+
+    /// Makes it open-ended (see [`Job::open`]).
+    pub fn open(mut self) -> Job {
+        self.open = true;
+        self
+    }
+
+    /// Tags it with a kind of work (see [`Job::kind`]).
+    pub fn kind(mut self, kind: impl Into<String>) -> Job {
+        self.kind = Some(kind.into());
+        self
+    }
+
+    pub fn preempt(mut self, p: Preempt) -> Job {
+        self.preempt = p;
         self
     }
 }

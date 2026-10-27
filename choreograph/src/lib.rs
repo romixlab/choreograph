@@ -90,6 +90,6 @@ pub use plan::{FirstFit, Plan, Planner, Reservation, Start, WaitReason};
 pub use policy::{Backfill, Placement, Policy, Quantile};
 pub use recording::{Profile, ProfileSettings, Recording};
 pub use sim::{SimConfig, SimRun, simulate};
-pub use state::{Assignment, JobStatus, LostJobs, Outcome, State, StateError};
+pub use state::{Assignment, JobStatus, LostJobs, Outcome, Paused, State, StateError};
 pub use time::{Dur, Time};
 pub use trace::{Event, Record, Trace};
