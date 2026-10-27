@@ -50,6 +50,7 @@
 //! run = { p50 = "1h", p90 = "3h" }
 //! preempt = "ask"                      # never (default), at_phase_boundary, ask
 //! pause_keeps = ["supply"]             # kinds a pause keeps; the rest is given back
+//! budgets = [{ name = "wall", meter = "wall", soft = 7200000, hard = 14400000 }]  # see choreograph::budget
 //! needs = [{ kind = "supply" }]
 //! ```
 //!
@@ -210,6 +211,8 @@ struct JobT {
     open: bool,
     #[serde(default)]
     pause_keeps: Vec<String>,
+    #[serde(default)]
+    budgets: Vec<crate::budget::Budget>,
 }
 
 /// Parses a job set from TOML text into a validated [`Model`].
@@ -398,6 +401,7 @@ pub fn from_toml(text: &str) -> Result<Model, JobSetError> {
             kind: j.kind.clone(),
             open: j.open,
             pause_keeps,
+            budgets: j.budgets.clone(),
         });
     }
     for (name, members) in groups {

@@ -706,3 +706,129 @@ queued_stale = "2h"
         .unwrap();
     svc.stop().await;
 }
+
+/// Two sessions with budgets: a crossing is heard on the report and the heartbeat, a restart in place keeps
+/// the lease, the holders tell each other until the pair guard calls it a loop, steps survive a restart of
+/// the service, and the wall budget's hard level stops a session.
+#[tokio::test(start_paused = true)]
+async fn sessions_have_budgets_restart_in_place_and_tell_each_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let extra = r#"
+[[job_kind]]
+name = "session"
+open = true
+budgets = [
+  { name = "context", scope = "step", soft = 150, hard = 190 },
+  { name = "wall", meter = "wall", hard = "2h", on_hard = "stop" },
+]
+[lease]
+ttl = "1h"
+pair_bounces = 2
+[settings]
+node_stale = "4h"
+"#;
+    let svc = Svc::open(config(dir.path(), extra));
+    let (a, b) = (svc.client("a"), svc.client("b"));
+    svc.client("node-1")
+        .report("node-1", &room(&[("gate", 2)]))
+        .await
+        .unwrap();
+    let session: SubmitJob = serde_json::from_value(serde_json::json!({
+        "name": "s", "kind": "session", "needs": [need("gate", 1)],
+    }))
+    .unwrap();
+    let ja = a.submit(&session).await.unwrap();
+    let jb = b.submit(&session).await.unwrap();
+    let (la, lb) = (ja.lease.unwrap(), jb.lease.unwrap());
+    assert_eq!(la.step, 1);
+
+    // Past the context's soft level: heard on the report and in the lease.
+    let used = |n: u64| BTreeMap::from([("context".to_string(), n)]);
+    let u = a.report_use(la.token, used(160)).await.unwrap();
+    assert_eq!((u.step, u.stop), (1, false));
+    assert_eq!(
+        u.over
+            .iter()
+            .map(|c| (c.budget.as_str(), c.level))
+            .collect::<Vec<_>>(),
+        [("context", choreograph::Level::Soft)]
+    );
+    assert_eq!(a.job(ja.id).await.unwrap().lease.unwrap().over, u.over);
+
+    // A restart in place: same token, step 2, the context begins again.
+    let r = a.restart(la.token).await.unwrap();
+    let rl = r.lease.unwrap();
+    assert_eq!(
+        (r.state, rl.token, rl.step),
+        (JobState::Running, la.token, 2)
+    );
+    assert!(
+        a.report_use(la.token, used(10))
+            .await
+            .unwrap()
+            .over
+            .is_empty()
+    );
+
+    // Tells between the two: from outside a lease, then back and forth until the guard refuses.
+    b.tell(ja.id, "main moved", None).await.unwrap();
+    b.tell(ja.id, "your turn", Some(lb.token)).await.unwrap();
+    let beat = a.heartbeat(la.token).await.unwrap();
+    let wakes: Vec<(Option<u64>, &str)> = beat
+        .wakes
+        .iter()
+        .map(|w| (w.from, w.text.as_str()))
+        .collect();
+    assert_eq!(wakes, [(None, "main moved"), (Some(jb.id), "your turn")]);
+    assert!(
+        a.heartbeat(la.token).await.unwrap().wakes.is_empty(),
+        "once"
+    );
+    a.tell(jb.id, "no, yours", Some(la.token)).await.unwrap(); // bounce 1
+    b.tell(ja.id, "no, yours", Some(lb.token)).await.unwrap(); // bounce 2
+    let e = a
+        .tell(jb.id, "no, yours", Some(la.token))
+        .await
+        .unwrap_err();
+    assert_eq!(code(e), "pair_loop");
+    // A sender names only its own lease; a job without a lease cannot be told.
+    let e = a.tell(jb.id, "hi", Some(lb.token)).await.unwrap_err();
+    assert_eq!(code(e), "forbidden");
+    let jq = a.submit(&session).await.unwrap();
+    assert_eq!(jq.state, JobState::Queued);
+    let e = b.tell(jq.id, "hi", None).await.unwrap_err();
+    assert_eq!(code(e), "conflict");
+    a.cancel(jq.id).await.unwrap();
+
+    // The step and the waiting tells survive a restart of the service.
+    drop((a, b));
+    svc.stop().await;
+    let svc = Svc::open(config(dir.path(), extra));
+    let (a, b) = (svc.client("a"), svc.client("b"));
+    assert_eq!(a.job(ja.id).await.unwrap().lease.unwrap().step, 2);
+    let beat = b.heartbeat(lb.token).await.unwrap();
+    assert_eq!(beat.wakes.len(), 1, "a's tell before the restart");
+
+    // Two hours of wall time: the stopping budget's hard level ends both sessions at their heartbeat.
+    svc.client("node-1")
+        .report("node-1", &room(&[("gate", 2)]))
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        sleep(Dur::mins(50).to_std()).await;
+        assert!(!a.heartbeat(la.token).await.unwrap().stop);
+        b.heartbeat(lb.token).await.unwrap();
+    }
+    sleep(Dur::mins(20).to_std()).await;
+    let beat = a.heartbeat(la.token).await.unwrap();
+    assert!(beat.stop);
+    assert!(
+        beat.over
+            .iter()
+            .any(|c| c.budget == "wall" && c.level == choreograph::Level::Hard)
+    );
+    let v = a.release(la.token, Outcome::Cancelled).await.unwrap();
+    assert_eq!(v.outcome, Some(Outcome::Cancelled));
+    b.release(lb.token, Outcome::Ok).await.unwrap();
+    svc.stop().await;
+}

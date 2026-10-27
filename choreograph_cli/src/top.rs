@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration as StdDur;
 
-use choreograph::{Dur, Outcome, Time};
+use choreograph::{Dur, Level, Outcome, Time};
 use choreographd::api::{JobView, NodeView, QueueView, WaitView};
 use choreographd::client::Client;
 use clap::{Args, ValueHint};
@@ -229,6 +229,17 @@ fn render_running(out: &mut String, color: bool, j: &JobView, now: Time) {
                 paint(color, "33", &format!("resuming: {}", fmt_wait(w)))
             ));
         }
+        if l.step > 1 {
+            t.push_str(&format!("  step {}", l.step));
+        }
+        for c in &l.over {
+            let (code, level) = match c.level {
+                Level::Soft => ("33", "soft"),
+                Level::Hard => ("31", "hard"),
+            };
+            let text = format!("{} past {level} {}/{}", c.budget, c.used, c.limit);
+            t.push_str(&format!("  {}", paint(color, code, &text)));
+        }
         if l.give_way {
             t.push_str(&format!("  {}", paint(color, "35", "asked to give way")));
         }
@@ -343,6 +354,7 @@ fn paint(color: bool, code: &str, s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use choreograph::Crossing;
     use choreographd::api::{EtaView, HeldView, JobState, LeaseView, ResourceView};
 
     fn job(id: u64, name: &str, client: &str, state: JobState) -> JobView {
@@ -399,6 +411,8 @@ mod tests {
             }],
             paused: None,
             give_way: false,
+            step: 1,
+            over: vec![],
         });
         running.eta = Some(EtaView {
             start_p50: None,
@@ -495,6 +509,8 @@ mod tests {
             ],
             paused: Some(now - Dur::mins(5)),
             give_way: false,
+            step: 1,
+            over: vec![],
         });
         let mut soak = job(4, "soak", "ci", JobState::Running);
         soak.lease = Some(LeaseView {
@@ -504,6 +520,13 @@ mod tests {
             held: vec![held("bench-1/probe", "probe", false)],
             paused: None,
             give_way: true,
+            step: 3,
+            over: vec![Crossing {
+                budget: "context".into(),
+                level: Level::Soft,
+                used: 160,
+                limit: 150,
+            }],
         });
         view.running = vec![s, soak];
         let r = render(&view, false);
@@ -514,7 +537,12 @@ mod tests {
             ),
             "{r}"
         );
-        assert!(r.contains("heartbeat within 50s  asked to give way"), "{r}");
+        assert!(
+            r.contains(
+                "heartbeat within 50s  step 3  context past soft 160/150  asked to give way"
+            ),
+            "{r}"
+        );
     }
 
     #[test]

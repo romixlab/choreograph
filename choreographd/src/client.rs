@@ -27,6 +27,7 @@
 //! # }
 //! ```
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -46,7 +47,7 @@ use tower::ServiceExt;
 
 use crate::api::{
     ApiError, BeatView, Health, JobRef, JobView, NodeReport, NodeView, QueueView, Release,
-    SubmitGroup, SubmitJob,
+    SubmitGroup, SubmitJob, TellJob, UsageView, UseReport,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -241,6 +242,48 @@ impl Client {
             Method::POST,
             &format!("/v1/leases/{token}/resume"),
             None::<&()>,
+        )
+        .await
+    }
+
+    /// Reports what the current step of the lease has used; answers with the budgets it is over.
+    pub async fn report_use(
+        &self,
+        token: u64,
+        used: BTreeMap<String, u64>,
+    ) -> Result<UsageView, ClientError> {
+        self.call(
+            Method::POST,
+            &format!("/v1/leases/{token}/usage"),
+            Some(&UseReport { used }),
+        )
+        .await
+    }
+
+    /// Restarts the lease's job in place: the next step, same lease, token and resources.
+    pub async fn restart(&self, token: u64) -> Result<JobView, ClientError> {
+        self.call(
+            Method::POST,
+            &format!("/v1/leases/{token}/restart"),
+            None::<&()>,
+        )
+        .await
+    }
+
+    /// Leaves a message for a running job's holder; `from`: the caller's own lease, if it holds one.
+    pub async fn tell(
+        &self,
+        id: JobRef,
+        text: &str,
+        from: Option<u64>,
+    ) -> Result<JobView, ClientError> {
+        self.call(
+            Method::POST,
+            &format!("/v1/jobs/{id}/tell"),
+            Some(&TellJob {
+                text: text.into(),
+                from,
+            }),
         )
         .await
     }

@@ -10,6 +10,7 @@
 //! | 403 | `forbidden` |
 //! | 404 | `not_found` |
 //! | 409 | `conflict`, `stale_lease` |
+//! | 429 | `pair_loop` (a tell between two holders that answer each other too often) |
 //! | 410 | `expired_lease` |
 //! | 413 | `too_large` |
 //! | 422 | `invalid` (a request that parses but cannot be done) |
@@ -26,7 +27,9 @@ use choreograph::Dur;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use crate::api::{ApiError, Health, NodeReport, Release, SubmitGroup, SubmitJob};
+use crate::api::{
+    ApiError, Health, NodeReport, Release, SubmitGroup, SubmitJob, TellJob, UseReport,
+};
 use crate::config::ClientConfig;
 use crate::daemon::Daemon;
 use crate::service::Refusal;
@@ -45,6 +48,9 @@ pub fn router(d: Daemon) -> Router {
         .route("/v1/leases/{token}/release", post(release))
         .route("/v1/leases/{token}/pause", post(pause))
         .route("/v1/leases/{token}/resume", post(resume))
+        .route("/v1/leases/{token}/usage", post(usage))
+        .route("/v1/leases/{token}/restart", post(restart))
+        .route("/v1/jobs/{id}/tell", post(tell))
         .route("/v1/nodes/{name}", post(report))
         .route("/v1/queue", get(queue))
         .fallback(|| async { Fail::new(StatusCode::NOT_FOUND, "not_found", "no such route") })
@@ -80,6 +86,7 @@ impl From<Refusal> for Fail {
             Refusal::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Refusal::StaleLease(_) | Refusal::Conflict(_) => StatusCode::CONFLICT,
             Refusal::ExpiredLease(_) => StatusCode::GONE,
+            Refusal::Loop(_) => StatusCode::TOO_MANY_REQUESTS,
             Refusal::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         };
         Fail::new(status, r.code(), r.to_string())
@@ -270,6 +277,42 @@ async fn resume(
     let c = client(&d, &h)?;
     let Path(token) = token?;
     Ok(axum::Json(d.call(|s, now| s.resume(&c, token, now))?))
+}
+
+async fn usage(
+    State(d): State<Daemon>,
+    h: HeaderMap,
+    token: Result<Path<u64>, PathRejection>,
+    b: Result<Bytes, BytesRejection>,
+) -> Answer<crate::api::UsageView> {
+    let c = client(&d, &h)?;
+    let Path(token) = token?;
+    let r: UseReport = body(b)?;
+    Ok(axum::Json(
+        d.call(|s, now| s.report_use(&c, token, r, now))?,
+    ))
+}
+
+async fn restart(
+    State(d): State<Daemon>,
+    h: HeaderMap,
+    token: Result<Path<u64>, PathRejection>,
+) -> Answer<crate::api::JobView> {
+    let c = client(&d, &h)?;
+    let Path(token) = token?;
+    Ok(axum::Json(d.call(|s, now| s.restart(&c, token, now))?))
+}
+
+async fn tell(
+    State(d): State<Daemon>,
+    h: HeaderMap,
+    id: Result<Path<u64>, PathRejection>,
+    b: Result<Bytes, BytesRejection>,
+) -> Answer<crate::api::JobView> {
+    let c = client(&d, &h)?;
+    let Path(id) = id?;
+    let t: TellJob = body(b)?;
+    Ok(axum::Json(d.call(|s, now| s.tell(&c, id, t, now))?))
 }
 
 async fn report(

@@ -30,12 +30,18 @@
 //! preempt = "ask"      # its holder may be asked to give way for a more important job
 //! pause_keeps = ["main"]
 //! run = { p50 = "2h", p90 = "6h" }  # the guess until releases of the kind have taught one
+//! budgets = [                        # what a job may use under its lease, see choreograph::budget
+//!   { name = "context", scope = "step", soft = 150000, hard = 190000 },
+//!   { name = "wall", meter = "wall", soft = "8h", hard = "12h", on_hard = "stop" },
+//! ]
 //!
 //! [policy]             # the list scheduler (choreograph::Policy); every key optional
 //! aging_per_class = "1h"
 //!
 //! [lease]              # choreograph::LeaseSettings
 //! ttl = "1m"
+//! pair_bounces = 6     # tells back and forth between two holders before the next is refused; "off"
+//! pair_window = "10m"  # a pair quiet this long counts again
 //!
 //! [settings]           # this service's own settings, see Settings
 //! node_stale = "2m"
@@ -59,7 +65,7 @@ use choreograph::{Dur, LeaseSettings, Policy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::api::EstimateSpec;
+use crate::api::{BudgetSpec, EstimateSpec};
 
 /// The whole configuration file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -153,6 +159,10 @@ pub struct JobKindConfig {
     /// over both. Default: none (zero).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<EstimateSpec>,
+    /// What a job of the kind may use under its lease, with soft and hard levels (a job's own `budgets`
+    /// win). Default: none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub budgets: Vec<BudgetSpec>,
 }
 
 fn socket_mode() -> u32 {
@@ -368,6 +378,11 @@ impl Config {
             }
             if k.name.is_empty() {
                 return bad("a job kind needs a name".into());
+            }
+            let budgets: Vec<choreograph::Budget> =
+                k.budgets.iter().cloned().map(Into::into).collect();
+            if let Err(e) = choreograph::budget::check(&budgets) {
+                return bad(format!("job kind {:?}: {e}", k.name));
             }
             if let Some(r) = k.pause_keeps.iter().find(|r| self.kind(r).is_none()) {
                 return bad(format!(
@@ -608,6 +623,12 @@ mod tests {
         assert!(c.kind("main").unwrap().shared);
         let session = c.job_kind("session").unwrap();
         assert!(session.open && session.preempt == Preempt::Ask);
+        let wall = session.budgets.iter().find(|b| b.name == "wall").unwrap();
+        assert_eq!(
+            wall.hard,
+            Some(Dur::hours(12).as_ms() as u64),
+            "durations as text"
+        );
         assert!(!c.tokens && c.tls.is_none());
         let c = Config::parse(include_str!("../deploy/config.tls.example.toml")).unwrap();
         assert!(c.tokens && c.tls.is_some() && c.clients.len() == 2);
@@ -635,6 +656,11 @@ mod tests {
                 "[[job_kind]]\nname = \"s\"\npreempt = \"maybe\"",
                 "unknown variant",
             ),
+            (
+                "[[job_kind]]\nname = \"s\"\nbudgets = [{ name = \"t\", soft = 5, hard = 4 }]",
+                "above",
+            ),
+            ("[lease]\npair_bounces = \"lots\"", "a number or"),
             ("[settings]\ntick = \"soon\"", "not a duration"),
         ] {
             let e = Config::parse(&with_clients(&format!("{BASE}\n{extra}")))

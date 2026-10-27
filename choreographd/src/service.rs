@@ -19,7 +19,8 @@ use choreograph::{
 
 use crate::api::{
     BeatView, EstimateSpec, EtaView, HeldView, JobRef, JobState, JobView, LeaseView, NeedSpec,
-    NodeReport, NodeView, QueueView, ResourceView, SubmitGroup, SubmitJob, WaitView,
+    NodeReport, NodeView, QueueView, ResourceView, SubmitGroup, SubmitJob, TellJob, UsageView,
+    UseReport, WaitView, WakeView,
 };
 use crate::config::{ClientConfig, Config, JobKindConfig};
 use crate::store::{JobMeta, Line, STATE_VERSION, Store, StoreError};
@@ -41,6 +42,9 @@ pub enum Refusal {
     ExpiredLease(String),
     #[error("{0}")]
     Conflict(String),
+    /// A tell between two holders that answer each other too often (the pair guard).
+    #[error("{0}")]
+    Loop(String),
     /// The journal could not be written: the service stops taking calls and exits.
     #[error("{0}")]
     Unavailable(String),
@@ -56,6 +60,7 @@ impl Refusal {
             Refusal::StaleLease(_) => "stale_lease",
             Refusal::ExpiredLease(_) => "expired_lease",
             Refusal::Conflict(_) => "conflict",
+            Refusal::Loop(_) => "pair_loop",
             Refusal::Unavailable(_) => "unavailable",
         }
     }
@@ -69,6 +74,7 @@ impl From<LeaseError> for Refusal {
             LeaseError::NotHeld { .. } => Refusal::Conflict(e.to_string()),
             LeaseError::Settings(_) | LeaseError::Model(_) => Refusal::Invalid(e.to_string()),
             LeaseError::State(_) => Refusal::Conflict(e.to_string()),
+            LeaseError::PairLoop { .. } => Refusal::Loop(e.to_string()),
         }
     }
 }
@@ -360,7 +366,96 @@ impl Service {
             expires: beat.expires,
             stop: beat.stop,
             give_way: beat.give_way,
+            over: beat.over,
+            wakes: beat
+                .wakes
+                .into_iter()
+                .map(|w| WakeView {
+                    from: w.from.map(|j| self.jobs[j.index()].id),
+                    at: w.at,
+                    text: w.text,
+                })
+                .collect(),
         })
+    }
+
+    /// The holder reports what the current step of its lease has used; answers with the budgets it is over.
+    /// A stopping budget's hard level cancels the job, which plans again.
+    pub fn report_use(
+        &mut self,
+        client: &ClientConfig,
+        token: u64,
+        r: UseReport,
+        now: Time,
+    ) -> Result<UsageView, Refusal> {
+        self.begin(now)?;
+        let j = self.own_lease(client, Token(token))?;
+        let over = self
+            .auth
+            .report_use(Token(token), r.used)
+            .map_err(Refusal::from)?;
+        let stop = matches!(
+            self.auth.live().state().status(j),
+            JobStatus::Running { ending, .. } if *ending != Outcome::Ok
+        );
+        let step = self
+            .auth
+            .lease(Token(token))
+            .map_or(1, |l| l.usage.restarts + 1);
+        self.end()?;
+        Ok(UsageView { step, over, stop })
+    }
+
+    /// Restarts the lease's job in place: a fresh process of its holder under the same lease, token and
+    /// resources, the next step. Not a new start: nothing is planned or woken.
+    pub fn restart(
+        &mut self,
+        client: &ClientConfig,
+        token: u64,
+        now: Time,
+    ) -> Result<JobView, Refusal> {
+        self.begin(now)?;
+        let j = self.own_lease(client, Token(token))?;
+        let id = self.jobs[j.index()].id;
+        self.auth.restart(Token(token)).map_err(Refusal::from)?;
+        self.end()?;
+        self.view_by_id(id)
+    }
+
+    /// Leaves a message for the holder of a running job, handed over with its next heartbeat. Any client may
+    /// tell any running job; a sender that holds a lease names it (`from`, its own), and tells between two
+    /// leases pass the pair guard.
+    pub fn tell(
+        &mut self,
+        client: &ClientConfig,
+        id: JobRef,
+        t: TellJob,
+        now: Time,
+    ) -> Result<JobView, Refusal> {
+        self.begin(now)?;
+        let to = self.job_id(id)?;
+        if let Some(f) = t.from {
+            self.own_lease(client, Token(f))?;
+        }
+        if t.text.is_empty() {
+            return Err(Refusal::Invalid("a tell needs a text".into()));
+        }
+        self.auth
+            .tell(t.from.map(Token), to, t.text)
+            .map_err(|e| match e {
+                LeaseError::State(_) => Refusal::Conflict(format!(
+                    "job {id} holds no lease: only a running job's holder can be told"
+                )),
+                LeaseError::PairLoop { from, to, bounces } => Refusal::Loop(format!(
+                    "jobs {} and {} have told each other back and forth {bounces} times within the \
+                     pair window: refused as a loop",
+                    self.jobs[from.index()].id,
+                    self.jobs[to.index()].id
+                )),
+                e => e.into(),
+            })?;
+        self.end()?;
+        self.view_by_id(id)
     }
 
     /// Pauses a lease's job: it keeps its lease and what its kind keeps on pause, gives back the rest, and
@@ -857,6 +952,13 @@ impl Service {
             .or(kind.as_ref().map(|k| k.preempt))
             .unwrap_or_default();
         job.pause_keeps = pause_keeps;
+        job.budgets = req
+            .budgets
+            .or(kind.as_ref().map(|k| k.budgets.clone()))
+            .unwrap_or_default()
+            .into_iter()
+            .map(Into::into)
+            .collect();
         job.kind = kind.map(|k| k.name);
         Ok(job)
     }
@@ -1051,6 +1153,10 @@ impl Service {
                         .collect(),
                     paused: paused.as_ref().map(|p| p.since),
                     give_way: l.give_way,
+                    step: l.usage.restarts + 1,
+                    over: l
+                        .usage
+                        .over(&model.job(j).budgets, l.granted, self.auth.now()),
                 });
             }
             JobStatus::Done { at, outcome } => {

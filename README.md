@@ -63,6 +63,8 @@ block); a listener beyond loopback is refused without both.
 | cancel it | `POST /v1/jobs/{id}/cancel` |
 | keep / end its lease | `POST /v1/leases/{token}/heartbeat`, `POST /v1/leases/{token}/release` |
 | pause / go on (open-ended jobs) | `POST /v1/leases/{token}/pause`, `POST /v1/leases/{token}/resume` |
+| report use against its budgets / restart in place | `POST /v1/leases/{token}/usage`, `POST /v1/leases/{token}/restart` |
+| tell a running job's holder | `POST /v1/jobs/{id}/tell` |
 | report a node | `POST /v1/nodes/{name}` |
 | the queue | `GET /v1/queue` |
 | is it up (no token) | `GET /v1/health` |

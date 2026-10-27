@@ -15,6 +15,8 @@
 //! - [`lease`]: [`Authority`], the one authority over a live model: every start a [`Lease`] with a fencing
 //!   [`Token`], a TTL and heartbeats, released with an outcome or expired; an append-only journal of every
 //!   change, replayed to rebuild the same state after a restart.
+//! - [`budget`]: budgets on a lease (reported or wall-clock use, per lease or per step, soft and hard
+//!   levels) and what crossing them does.
 //! - [`plan`]: the [`Planner`] trait, [`Plan`], [`WaitReason`] and the [`FirstFit`] baseline.
 //! - [`cache`]: the result cache: a job with unchanged inputs and a valid result is not run again.
 //! - [`list`]: [`ListScheduler`], the main planner: priorities with aging and deadline urgency, placement,
@@ -60,6 +62,7 @@
 //! state.start(&model, &plan.batch()).unwrap();
 //! ```
 
+pub mod budget;
 pub mod cache;
 pub mod estimates;
 #[cfg(feature = "toml")]
@@ -78,8 +81,9 @@ pub mod theory;
 pub mod time;
 pub mod trace;
 
+pub use budget::{Budget, Crossing, Level, Usage};
 pub use estimates::{EstimateKey, EstimateSettings, Estimates, Learner, Quantiles};
-pub use lease::{Authority, Beat, Entry, Lease, LeaseError, LeaseSettings, Op, Token};
+pub use lease::{Authority, Beat, Entry, Lease, LeaseError, LeaseSettings, Op, Tell, Token};
 pub use list::{Eta, Forecast, ListScheduler, Span};
 pub use live::Live;
 pub use metrics::{Collector, Metrics, MetricsConfig};

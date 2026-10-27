@@ -164,6 +164,24 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   `choreographd/tests/e2e.rs` (several clients on paused time), `choreographd/tests/tls.rs`,
   `choreographd/tests/unix.rs`.
 
+## SESS: long sessions on leases
+
+- ✅ **SESS-1 session-leases**: leases for long work that decides alone within budgets (an agent session, a
+  person on a bench, a soak test). A job carries budgets (`budget.rs`: a name, a meter `reported` by the holder
+  or `wall` time from the authority's clock, a scope over the whole lease or the current step, soft and hard
+  levels, `on_hard` `tell` or `stop`); the holder reports its step's use (`Authority::report_use`) and hears
+  every budget at or past a level on that report and on each heartbeat (`Beat::over`): a lease event it acts
+  on, not a guard, and only a `stop` budget's hard level cancels the job. A restart in place
+  (`Authority::restart`: a fresh process under the same lease, token and resources, the next step; step
+  budgets begin again, lease budgets add up) is not a new start and not a wake. Tells (`Authority::tell`)
+  leave a message for a running job's holder, handed over once with its next heartbeat (`Beat::wakes`); the
+  only loop guard is per pair of holders (`LeaseSettings::pair_bounces`, default 6, `pair_window`, default
+  10m). All of it journaled and replayed. In `choreographd`: budgets per `[[job_kind]]` or per job (levels as
+  numbers or durations), `POST /v1/leases/{token}/usage`, `/restart`, `POST /v1/jobs/{id}/tell`, the
+  `pair_loop` refusal (429), `step` and `over` on the lease, `over` and `wakes` on the heartbeat; `choreograph
+  top` shows the step and the levels crossed. Tests: `choreograph/tests/session_leases.rs`,
+  `choreographd/tests/e2e.rs` (`sessions_have_budgets_...`).
+
 ## GUI: graphical interface
 
 - 📋 **GUI-1 gui-timeline**: an egui app: load a job set or trace, a timeline per resource grouped by node.

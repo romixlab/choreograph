@@ -97,7 +97,7 @@ pub struct Policy {
     pub open_floor: Dur,
     /// How many classes higher a job that cannot start must be to ask a running `Preempt::Ask` job to give
     /// way. `None` (`"off"`): never ask.
-    #[serde(with = "opt_gap")]
+    #[serde(with = "or_off")]
     pub preempt_gap: Option<i32>,
 }
 
@@ -206,30 +206,35 @@ pub(crate) mod opt_dur {
     }
 }
 
-/// A class gap as an integer, or `"off"`.
-pub(crate) mod opt_gap {
+/// A number, or `"off"` for `None`.
+pub(crate) mod or_off {
     use super::*;
 
     #[derive(Deserialize)]
     #[serde(untagged)]
-    enum Gap {
-        N(i32),
+    enum Or<T> {
+        N(T),
         Text(String),
     }
 
-    pub fn serialize<S: serde::Serializer>(g: &Option<i32>, s: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: serde::Serializer, T: Serialize>(
+        g: &Option<T>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
         match g {
-            Some(g) => s.serialize_i32(*g),
+            Some(g) => g.serialize(s),
             None => s.serialize_str("off"),
         }
     }
 
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i32>, D::Error> {
-        match Gap::deserialize(d)? {
-            Gap::N(n) => Ok(Some(n)),
-            Gap::Text(t) if t == "off" => Ok(None),
-            Gap::Text(t) => Err(serde::de::Error::custom(format!(
-                "{t:?}: a number of classes or \"off\""
+    pub fn deserialize<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+        d: D,
+    ) -> Result<Option<T>, D::Error> {
+        match Or::<T>::deserialize(d)? {
+            Or::N(n) => Ok(Some(n)),
+            Or::Text(t) if t == "off" => Ok(None),
+            Or::Text(t) => Err(serde::de::Error::custom(format!(
+                "{t:?}: a number or \"off\""
             ))),
         }
     }

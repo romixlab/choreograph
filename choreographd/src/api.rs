@@ -12,6 +12,9 @@
 //! | end its lease | `POST /v1/leases/{token}/release` | [`Release`] | [`JobView`] |
 //! | pause its job | `POST /v1/leases/{token}/pause` | | [`JobView`] |
 //! | go on after a pause | `POST /v1/leases/{token}/resume` | | [`JobView`] |
+//! | report what it used | `POST /v1/leases/{token}/usage` | [`UseReport`] | [`UsageView`] |
+//! | restart in place | `POST /v1/leases/{token}/restart` | | [`JobView`] |
+//! | tell a job's holder | `POST /v1/jobs/{id}/tell` | [`TellJob`] | [`JobView`] |
 //! | report a node | `POST /v1/nodes/{name}` | [`NodeReport`] | [`NodeView`] |
 //! | the queue | `GET /v1/queue` | | [`QueueView`] |
 //! | is it up | `GET /v1/health` (no token) | | [`Health`] |
@@ -24,8 +27,9 @@
 
 use std::collections::BTreeMap;
 
+use choreograph::budget::{Budget, Meter, OnHard, Scope};
 use choreograph::model::{Labels, Preempt};
-use choreograph::{Dur, Outcome, Time};
+use choreograph::{Crossing, Dur, Outcome, Time};
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// The service's id of a job: never reused, stable for the job's whole life (the library's own ids are
@@ -78,6 +82,53 @@ pub struct SubmitJob {
     /// The resource kinds a pause keeps held (default: its kind's, else none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_keeps: Option<Vec<String>>,
+    /// What it may use under its lease (default: its kind's, else none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budgets: Option<Vec<BudgetSpec>>,
+}
+
+/// A budget on a job's lease (see [`choreograph::budget`]): the holder hears when it crosses a level.
+/// Levels are numbers in the unit the holder reports, or for a `wall` meter a duration (`"4h"` or
+/// milliseconds).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetSpec {
+    /// The name its use is reported under (`tokens`, `context`), any name for a wall budget.
+    pub name: String,
+    /// `reported` (default: the holder reports it) or `wall` (time since the grant or the step began).
+    #[serde(default)]
+    pub meter: Meter,
+    /// `lease` (default: every step added up) or `step` (begins again at a restart in place).
+    #[serde(default)]
+    pub scope: Scope,
+    #[serde(
+        default,
+        deserialize_with = "opt_amount",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub soft: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "opt_amount",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub hard: Option<u64>,
+    /// `tell` (default: the holder decides) or `stop` (the job is cancelled at the hard level).
+    #[serde(default)]
+    pub on_hard: OnHard,
+}
+
+impl From<BudgetSpec> for Budget {
+    fn from(b: BudgetSpec) -> Budget {
+        Budget {
+            name: b.name,
+            meter: b.meter,
+            scope: b.scope,
+            soft: b.soft,
+            hard: b.hard,
+            on_hard: b.on_hard,
+        }
+    }
 }
 
 /// One need of a job.
@@ -230,6 +281,11 @@ pub struct LeaseView {
     /// A more important job waits for what it holds: pause or release when you can.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub give_way: bool,
+    /// The step of the job under this lease: 1, and one more at each restart in place.
+    pub step: u32,
+    /// Every budget at or past a level now.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub over: Vec<Crossing>,
 }
 
 /// One resource a lease holds.
@@ -245,7 +301,7 @@ pub struct HeldView {
 }
 
 /// The answer to a heartbeat.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeatView {
     pub expires: Time,
     /// The job was cancelled: stop it, clean up and release.
@@ -254,6 +310,52 @@ pub struct BeatView {
     /// `preempt` is `ask`). Nothing is taken from it.
     #[serde(default)]
     pub give_way: bool,
+    /// Every budget at or past a level now: plan the end at a soft level, end at a hard one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub over: Vec<Crossing>,
+    /// Tells for the holder since its last heartbeat, oldest first, each handed over once: the wakes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wakes: Vec<WakeView>,
+}
+
+/// A tell handed to a holder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WakeView {
+    /// The job whose holder sent it; none from outside a lease.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<JobRef>,
+    pub at: Time,
+    pub text: String,
+}
+
+/// What the current step of a lease has used, per name (`tokens`, `context`): each name given is set, the
+/// others keep their last value. Report the step's running total, not the difference since the last report.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UseReport {
+    pub used: BTreeMap<String, u64>,
+}
+
+/// The answer to a use report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageView {
+    pub step: u32,
+    /// Every budget at or past a level now.
+    #[serde(default)]
+    pub over: Vec<Crossing>,
+    /// The job was cancelled (a stopping budget's hard level, or a cancel): stop it, clean up and release.
+    pub stop: bool,
+}
+
+/// A message for a job's holder, handed over with its next heartbeat.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TellJob {
+    pub text: String,
+    /// The sender's lease token, when the sender holds one (it must be the caller's): tells between two
+    /// leases count for the pair guard. None from outside a lease.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<u64>,
 }
 
 /// The end of a lease.
@@ -337,7 +439,7 @@ pub struct Health {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiError {
     /// A stable code: `unauthorized`, `forbidden`, `not_found`, `invalid`, `stale_lease`, `expired_lease`,
-    /// `conflict`, `internal`.
+    /// `conflict`, `pair_loop` (two holders told each other back and forth too often), `internal`.
     pub error: String,
     pub message: String,
 }
@@ -351,6 +453,17 @@ fn dur<'de, D: Deserializer<'de>>(d: D) -> Result<Dur, D::Error> {
 
 fn opt_dur<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Dur>, D::Error> {
     dur(d).map(Some)
+}
+
+/// An amount: a number, or a duration as text, in milliseconds.
+fn opt_amount<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    let ms = match DurText::deserialize(d)? {
+        DurText::Ms(n) => n,
+        DurText::Text(t) => t.parse::<Dur>().map_err(serde::de::Error::custom)?.as_ms(),
+    };
+    u64::try_from(ms)
+        .map(Some)
+        .map_err(|_| serde::de::Error::custom("a budget level must not be negative"))
 }
 
 #[derive(Deserialize)]

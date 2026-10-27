@@ -58,10 +58,12 @@
 //! assert_eq!(Authority::replay(journal).unwrap(), auth);
 //! ```
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::budget::{Crossing, Level, OnHard, Usage};
 use crate::estimates::Learner;
 use crate::live::Live;
 use crate::model::{
@@ -100,6 +102,35 @@ pub struct Lease {
     /// say so ([`Beat::give_way`]) until it pauses, resumes or ends.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub give_way: bool,
+    /// What it has used, step by step (see [`budget`](crate::budget)).
+    #[serde(default)]
+    pub usage: Usage,
+    /// Tells not yet delivered: the next heartbeat hands them over.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mail: Vec<Tell>,
+}
+
+/// A message to a lease's holder, delivered (a wake) with its next heartbeat, at most once.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tell {
+    /// The job whose holder sent it; `None` from outside any lease (or from a job since compacted away).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<JobId>,
+    pub at: Time,
+    pub text: String,
+}
+
+/// The tells between two jobs, for the pair guard (see [`LeaseSettings::pair_bounces`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Pair {
+    /// The two jobs, lower id first.
+    a: JobId,
+    b: JobId,
+    /// Who sent the last tell between them, and when.
+    last_from: JobId,
+    last: Time,
+    /// Tells that went back the other way than the one before, since the pair was last quiet.
+    bounces: u32,
 }
 
 /// The settings of the leases.
@@ -113,6 +144,14 @@ pub struct LeaseSettings {
     /// What happens to the job of an expired lease: `requeue` (it runs again, for builds and tests) or `fail`
     /// (for work that must not run twice without a look).
     pub on_expiry: LostJobs,
+    /// The loop guard between two holders: a tell that goes back the other way than the pair's last one
+    /// (A tells B, B tells A) is a bounce, and the tell that would make more than this many is refused.
+    /// `None` (`"off"`): no guard. Tells from outside a lease are never counted.
+    #[serde(with = "crate::policy::or_off")]
+    pub pair_bounces: Option<u32>,
+    /// A pair quiet for this long starts counting its bounces again.
+    #[serde(with = "dur")]
+    pub pair_window: Dur,
 }
 
 impl Default for LeaseSettings {
@@ -120,6 +159,8 @@ impl Default for LeaseSettings {
         LeaseSettings {
             ttl: Dur::secs(60),
             on_expiry: LostJobs::Requeue,
+            pair_bounces: Some(6),
+            pair_window: Dur::mins(10),
         }
     }
 }
@@ -140,12 +181,15 @@ impl LeaseSettings {
         if self.ttl <= Dur::ZERO {
             return Err(LeaseError::Settings("ttl must be positive".into()));
         }
+        if self.pair_window <= Dur::ZERO {
+            return Err(LeaseError::Settings("pair_window must be positive".into()));
+        }
         Ok(())
     }
 }
 
 /// What a heartbeat tells the holder.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Beat {
     /// The new expiry.
     pub expires: Time,
@@ -155,6 +199,13 @@ pub struct Beat {
     /// [`Preempt::Ask`](crate::model::Preempt::Ask)). Nothing is taken from it.
     #[serde(default)]
     pub give_way: bool,
+    /// Every budget at or past a level now (see [`budget`](crate::budget)): the holder plans its end at a
+    /// soft level and ends at a hard one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub over: Vec<Crossing>,
+    /// Tells for the holder since its last heartbeat, oldest first: each is handed over once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wakes: Vec<Tell>,
 }
 
 /// Why a call was refused. A refused call changes nothing.
@@ -168,6 +219,14 @@ pub enum LeaseError {
     NotHeld { token: Token, resource: ResourceId },
     #[error("lease settings: {0}")]
     Settings(String),
+    #[error(
+        "jobs {from:?} and {to:?} have told each other back and forth {bounces} times: refused as a loop"
+    )]
+    PairLoop {
+        from: JobId,
+        to: JobId,
+        bounces: u32,
+    },
     #[error(transparent)]
     State(#[from] StateError),
     #[error(transparent)]
@@ -287,6 +346,18 @@ pub enum Op {
     GiveWay {
         jobs: Vec<JobId>,
     },
+    UseReport {
+        token: Token,
+        values: BTreeMap<String, u64>,
+    },
+    Restart {
+        token: Token,
+    },
+    Tell {
+        from: Option<Token>,
+        to: JobId,
+        text: String,
+    },
 }
 
 /// The one authority over a live model: grants leases, keeps them, and journals every change.
@@ -303,6 +374,9 @@ pub struct Authority {
     /// Durations learned per job kind from every release (see [`Authority::learned`]).
     #[serde(default)]
     learned: Learner,
+    /// The tells between pairs of jobs, for the pair guard.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pairs: Vec<Pair>,
     /// Entries not yet taken by the caller.
     #[serde(skip)]
     journal: Vec<Entry>,
@@ -317,6 +391,7 @@ impl PartialEq for Authority {
             && self.next == o.next
             && self.fence == o.fence
             && self.learned == o.learned
+            && self.pairs == o.pairs
     }
 }
 
@@ -340,6 +415,7 @@ impl Authority {
             next: Token(1),
             fence,
             learned: Learner::default(),
+            pairs: Vec::new(),
             journal: Vec::new(),
         };
         let s = a.snapshot();
@@ -465,6 +541,8 @@ impl Authority {
                 granted: now,
                 expires: now + self.settings.ttl,
                 give_way: false,
+                usage: Usage::new(now),
+                mail: Vec::new(),
             };
             self.leases.push(l.clone());
             granted.push(l);
@@ -476,23 +554,169 @@ impl Authority {
         Ok(granted)
     }
 
-    /// Keeps a lease alive: its expiry moves to one TTL from now. Refused once it has expired.
+    /// Keeps a lease alive: its expiry moves to one TTL from now, and the holder hears what is new: a
+    /// cancel, a request to give way, the budgets it is over (a hard level of an [`OnHard::Stop`] budget
+    /// cancels the job here), the tells waiting for it. Refused once it has expired.
     pub fn heartbeat(&mut self, token: Token) -> Result<Beat, LeaseError> {
         self.check(token)?;
         let i = self.find(token)?;
         let expires = self.now() + self.settings.ttl;
         self.leases[i].expires = expires;
+        let over = self.cross(i);
         let stop = matches!(
             self.live.state().status(self.leases[i].job),
             JobStatus::Running { ending, .. } if *ending != Outcome::Ok
         );
         let give_way = self.leases[i].give_way;
+        let wakes = std::mem::take(&mut self.leases[i].mail);
         self.log(Op::Heartbeat { token });
         Ok(Beat {
             expires,
             stop,
             give_way,
+            over,
+            wakes,
         })
+    }
+
+    /// The holder reports what its current step has used (`tokens`, `context`, any name its budgets count):
+    /// each name given is set, the others keep their last value. Returns every budget at or past a level now,
+    /// as a heartbeat would; a hard level of an [`OnHard::Stop`] budget cancels the job.
+    pub fn report_use(
+        &mut self,
+        token: Token,
+        values: BTreeMap<String, u64>,
+    ) -> Result<Vec<Crossing>, LeaseError> {
+        self.check(token)?;
+        let i = self.find(token)?;
+        self.leases[i].usage.report(&values);
+        let over = self.cross(i);
+        self.log(Op::UseReport { token, values });
+        Ok(over)
+    }
+
+    /// Restarts the job in place: a fresh process of its holder inside the same lease, with the same token,
+    /// place and resources (a checkpoint and restart, a context handoff). The step count rises, step budgets
+    /// begin again, lease budgets keep adding up, and the expiry moves to one TTL from now. Not a new start
+    /// and not a wake. Returns the restarts so far.
+    pub fn restart(&mut self, token: Token) -> Result<u32, LeaseError> {
+        self.check(token)?;
+        let i = self.find(token)?;
+        let now = self.now();
+        let budgets = self.live.model().job(self.leases[i].job).budgets.clone();
+        let l = &mut self.leases[i];
+        l.usage.restart(&budgets, now);
+        l.expires = now + self.settings.ttl;
+        let n = l.usage.restarts;
+        self.log(Op::Restart { token });
+        Ok(n)
+    }
+
+    /// Leaves a message for the holder of job `to`, handed over with its next heartbeat. `from` is the
+    /// sender's lease, or `None` from outside any lease. Between two leases the pair guard applies (see
+    /// [`LeaseSettings::pair_bounces`]): a back-and-forth past its limit is refused as a loop.
+    pub fn tell(
+        &mut self,
+        from: Option<Token>,
+        to: JobId,
+        text: impl Into<String>,
+    ) -> Result<(), LeaseError> {
+        let text = text.into();
+        let sender = match from {
+            Some(t) => Some(self.check(t)?.job),
+            None => None,
+        };
+        self.job_id(to)?;
+        let i = self
+            .leases
+            .iter()
+            .position(|l| l.job == to)
+            .ok_or(StateError::NotRunning(to))?;
+        let now = self.now();
+        if let Some(s) = sender.filter(|s| *s != to) {
+            self.guard_pair(s, to, now)?;
+        }
+        self.leases[i].mail.push(Tell {
+            from: sender,
+            at: now,
+            text: text.clone(),
+        });
+        self.log(Op::Tell { from, to, text });
+        Ok(())
+    }
+
+    /// Counts a tell from `s` to `t` for their pair, or refuses it as a loop.
+    fn guard_pair(&mut self, s: JobId, t: JobId, now: Time) -> Result<(), LeaseError> {
+        let (a, b) = if s < t { (s, t) } else { (t, s) };
+        let window = self.settings.pair_window;
+        let limit = self.settings.pair_bounces;
+        let i = match self.pairs.iter().position(|p| p.a == a && p.b == b) {
+            Some(i) => i,
+            None => {
+                self.pairs.push(Pair {
+                    a,
+                    b,
+                    last_from: s,
+                    last: now,
+                    bounces: 0,
+                });
+                return Ok(());
+            }
+        };
+        let p = &mut self.pairs[i];
+        if now - p.last >= window {
+            p.bounces = 0;
+        }
+        let bounces = p.bounces + u32::from(p.last_from != s);
+        if limit.is_some_and(|l| bounces > l) {
+            return Err(LeaseError::PairLoop {
+                from: s,
+                to: t,
+                bounces: p.bounces,
+            });
+        }
+        p.bounces = bounces;
+        p.last_from = s;
+        p.last = now;
+        Ok(())
+    }
+
+    /// Every budget of lease `i` at or past a level now. A level crossed for the first time is noted; a
+    /// hard one of an [`OnHard::Stop`] budget cancels the job.
+    fn cross(&mut self, i: usize) -> Vec<Crossing> {
+        let now = self.now();
+        let job = self.leases[i].job;
+        let budgets = &self.live.model().job(job).budgets;
+        if budgets.is_empty() {
+            return Vec::new();
+        }
+        let l = &self.leases[i];
+        let over = l.usage.over(budgets, l.granted, now);
+        let mut stop = false;
+        for c in &over {
+            let was = self.leases[i].usage.crossed.get(&c.budget).copied();
+            if was.is_some_and(|w| w >= c.level) {
+                continue;
+            }
+            self.leases[i]
+                .usage
+                .crossed
+                .insert(c.budget.clone(), c.level);
+            stop |= c.level == Level::Hard
+                && budgets
+                    .iter()
+                    .any(|b| b.name == c.budget && b.on_hard == OnHard::Stop);
+        }
+        let ending_ok = matches!(
+            self.live.state().status(job),
+            JobStatus::Running { ending, .. } if *ending == Outcome::Ok
+        );
+        if stop && ending_ok {
+            self.live
+                .cancel(job)
+                .expect("a leased job that ends well can be cancelled");
+        }
+        over
     }
 
     /// The holder finished the job's current phase (see [`State::advance`](crate::State::advance)); after
@@ -735,7 +959,19 @@ impl Authority {
         let remap = self.live.compact(done_by);
         for l in &mut self.leases {
             l.job = remap.job(l.job).expect("a leased job is running and kept");
+            for m in &mut l.mail {
+                m.from = m.from.and_then(|j| remap.job(j));
+            }
         }
+        self.pairs
+            .retain_mut(|p| match (remap.job(p.a), remap.job(p.b)) {
+                (Some(a), Some(b)) => {
+                    p.last_from = if p.last_from == p.a { a } else { b };
+                    (p.a, p.b) = (a, b);
+                    true
+                }
+                _ => false,
+            });
         self.log(Op::Compact { done_by });
         remap
     }
@@ -836,6 +1072,9 @@ impl Authority {
                 let want = jobs.clone();
                 return Ok(self.ask_give_way(jobs) == want);
             }
+            Op::UseReport { token, values } => self.report_use(token, values).map(drop)?,
+            Op::Restart { token } => self.restart(token).map(drop)?,
+            Op::Tell { from, to, text } => self.tell(from, to, text)?,
         }
         Ok(true)
     }
@@ -988,6 +1227,8 @@ mod tests {
                 expires: at(50),
                 stop: false,
                 give_way: false,
+                over: vec![],
+                wakes: vec![],
             }
         );
         auth.set_now(at(49)).unwrap();
@@ -1203,6 +1444,7 @@ mod tests {
         let settings = LeaseSettings {
             ttl: Dur::secs(10),
             on_expiry: LostJobs::Fail,
+            ..LeaseSettings::default()
         };
         let Fleet { mut auth, ram, .. } = fleet(settings);
         let a = auth.submit(Job::new("a").needs(ram, 10)).unwrap();

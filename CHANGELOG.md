@@ -26,8 +26,24 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 - `choreograph top` shows a job's kind, paused jobs with what they gave back, a resume's wait, and leases asked to
   give way (CORE-6).
 
+- Budgets on a lease (`budget` module: `Budget`, `Meter`, `Scope`, `OnHard`, `Usage`, `Crossing`, `Level`;
+  `Job::budgets`, the job-set key `budgets`): `Authority::report_use` and `Beat::over` tell the holder which
+  levels it crossed, a `stop` budget's hard level cancels the job (SESS-1).
+- Restart in place (`Authority::restart`): the next step of a job under the same lease, token and resources
+  (SESS-1).
+- Tells between holders (`Authority::tell`, `Tell`, `Beat::wakes`), delivered once with the next heartbeat,
+  with a guard against loops between two holders (`LeaseSettings::pair_bounces`, `pair_window`,
+  `LeaseError::PairLoop`) (SESS-1).
+- choreographd: budgets per `[[job_kind]]` and per job (`SubmitJob::budgets`); `POST /v1/leases/{token}/usage`,
+  `POST /v1/leases/{token}/restart`, `POST /v1/jobs/{id}/tell` (`Client::report_use`, `restart`, `tell`); the
+  `pair_loop` refusal (429); `LeaseView::step` and `over`, `BeatView::over` and `wakes`; `[lease]`
+  `pair_bounces` and `pair_window`. `choreograph top` shows the step and the budget levels crossed (SESS-1).
+
 ### Changed
 
+- **Breaking:** `Beat` and `choreographd::api::BeatView` are no longer `Copy` (they carry `over` and `wakes`);
+  `Lease` has `usage` and `mail`, `LeaseSettings` `pair_bounces` and `pair_window`, `ModelError` `BadBudget`
+  (SESS-1).
 - **Breaking:** `JobStatus::Running` has a `paused` field, `Beat` a `give_way` field, `Plan` a `give_way` map,
   `Policy` the settings `open_floor` and `preempt_gap` (CORE-6).
 - A wait (`POST /v1/jobs/{id}/wait`, `Client::wait_running`) now answers when the job no longer waits, which

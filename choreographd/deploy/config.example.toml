@@ -33,6 +33,12 @@ open = true
 preempt = "ask"
 pause_keeps = ["ram"]
 run = { p50 = "2h", p90 = "6h" }   # until releases of the kind have taught an estimate
+# What a session may use under its lease: the holder hears at each level and decides; only a hard level
+# with on_hard = "stop" ends it. A "step" budget begins again when the session restarts in place.
+budgets = [
+  { name = "context", scope = "step", soft = 150000, hard = 190000 },
+  { name = "wall", meter = "wall", soft = "8h", hard = "12h", on_hard = "stop" },
+]
 
 [policy]
 aging_per_class = "1h"
@@ -40,6 +46,8 @@ aging_per_class = "1h"
 [lease]
 ttl = "1m"
 on_expiry = "requeue"
+pair_bounces = 6       # tells back and forth between two holders before the next is refused ("off": none)
+pair_window = "10m"
 
 [settings]
 node_stale = "2m"

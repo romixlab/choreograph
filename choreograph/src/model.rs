@@ -296,6 +296,10 @@ pub struct Job {
     /// job is paused and taken again on resume. Empty: a pause gives back everything.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pause_keeps: Vec<KindId>,
+    /// What it may use under its lease (tokens, context, wall time), with soft and hard levels: the holder
+    /// hears when it crosses one (see [`budget`](crate::budget)). Set per job or by the caller per kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub budgets: Vec<crate::budget::Budget>,
 }
 
 impl Job {
@@ -632,6 +636,8 @@ pub enum ModelError {
     GroupMismatch { job: String, group: String },
     #[error("{what} id {id} is out of range")]
     BadId { what: &'static str, id: u32 },
+    #[error("job {job:?}: {problem}")]
+    BadBudget { job: String, problem: String },
 }
 
 /// Builds a [`Model`] step by step; [`ModelBuilder::build`] validates it.
@@ -823,6 +829,10 @@ fn check_jobs(m: &Model, first: usize) -> Result<(), ModelError> {
         for k in &j.pause_keeps {
             bad("kind", k.0, m.kinds.len())?;
         }
+        crate::budget::check(&j.budgets).map_err(|problem| ModelError::BadBudget {
+            job: j.name.clone(),
+            problem,
+        })?;
         if let Some(g) = j.group {
             bad("group", g.0, m.groups.len())?;
             if !m.groups[g.index()].members.contains(&JobId(ji as u32)) {
@@ -940,6 +950,7 @@ impl Job {
             kind: None,
             open: false,
             pause_keeps: Vec::new(),
+            budgets: Vec::new(),
         }
     }
 
@@ -995,6 +1006,12 @@ impl Job {
 
     pub fn preempt(mut self, p: Preempt) -> Job {
         self.preempt = p;
+        self
+    }
+
+    /// Adds a budget (see [`Job::budgets`]).
+    pub fn budget(mut self, b: crate::budget::Budget) -> Job {
+        self.budgets.push(b);
         self
     }
 }
