@@ -17,6 +17,8 @@
 //!   change, replayed to rebuild the same state after a restart.
 //! - [`budget`]: budgets on a lease (reported or wall-clock use, per lease or per step, soft and hard
 //!   levels) and what crossing them does.
+//! - [`standing`]: standing instructions, what a node may do while it can't reach the scheduler, and the pure
+//!   [`standing::decide`] that applies them.
 //! - [`plan`]: the [`Planner`] trait, [`Plan`], [`WaitReason`] and the [`FirstFit`] baseline.
 //! - [`cache`]: the result cache: a job with unchanged inputs and a valid result is not run again.
 //! - [`list`]: [`ListScheduler`], the main planner: priorities with aging and deadline urgency, placement,
@@ -76,6 +78,7 @@ pub mod plan;
 pub mod policy;
 pub mod recording;
 pub mod sim;
+pub mod standing;
 pub mod state;
 pub mod theory;
 pub mod time;

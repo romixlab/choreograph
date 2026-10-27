@@ -5,6 +5,13 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Added
+
+- Standing instructions (`standing` module: `Standing`, `Rule`, `Choice`, `Local`, `Go`, `LocalView`,
+  `LocalJob`, `Verdict`): what a node may do while it can't reach the scheduler, handed out ahead of time, and
+  the pure `standing::decide` that applies them (run here within a count and a share of the room, go to another
+  node, wait, or ran out); `Standing::lone` for a node with no scheduler (SVC-3).
+
 ## [0.4.0] - 2026-10-27
 
 ### Added
