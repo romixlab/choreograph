@@ -282,7 +282,7 @@ impl Service {
         now: Time,
     ) -> Result<JobView, Refusal> {
         self.begin(now)?;
-        let job = self.job_from(req, now, self.next_ref)?;
+        let job = self.job_from(req, now, self.next_ref, false)?;
         let refuse = self.refusal_for(&[&job]);
         let id = self.auth.submit(job).map_err(refuse)?;
         self.added(client, &[id], now);
@@ -307,7 +307,7 @@ impl Service {
             .jobs
             .into_iter()
             .zip(first..)
-            .map(|(j, r)| self.job_from(j, now, r))
+            .map(|(j, r)| self.job_from(j, now, r, true))
             .collect::<Result<Vec<_>, _>>()?;
         let refuse = self.refusal_for(&jobs.iter().collect::<Vec<_>>());
         let (_, ids) = self
@@ -918,13 +918,36 @@ impl Service {
     }
 
     /// The library job for a request; `id` is the job's [`JobRef`] to be.
-    fn job_from(&mut self, req: SubmitJob, now: Time, id: JobRef) -> Result<Job, Refusal> {
+    fn job_from(
+        &mut self,
+        req: SubmitJob,
+        now: Time,
+        id: JobRef,
+        in_group: bool,
+    ) -> Result<Job, Refusal> {
         if req.name.is_empty() {
             return Err(Refusal::Invalid("a job needs a name".into()));
         }
-        let mut needs = Vec::with_capacity(req.needs.len());
-        for n in req.needs {
+        let mut specs = req.shapes.into_iter();
+        let first = if req.needs.is_empty() {
+            specs.next().unwrap_or_default()
+        } else {
+            req.needs
+        };
+        let mut needs = Vec::with_capacity(first.len());
+        for n in first {
             needs.push(self.need_from(n)?);
+        }
+        let mut shapes = Vec::with_capacity(specs.len());
+        for (k, shape) in specs.enumerate() {
+            if shape.is_empty() {
+                return Err(Refusal::Invalid(format!("shape {} has no needs", k + 1)));
+            }
+            let mut s = Vec::with_capacity(shape.len());
+            for n in shape {
+                s.push(self.need_from(n)?);
+            }
+            shapes.push(s);
         }
         let mut after = Vec::with_capacity(req.after.len());
         for r in req.after {
@@ -998,6 +1021,35 @@ impl Service {
             .into_iter()
             .map(Into::into)
             .collect();
+        job.shapes = shapes;
+        // Start anyway: the job's own wait where its kind allows one, else its kind's for a job pinned to a
+        // node outside a group.
+        job.start_anyway_after = match req.start_anyway_after {
+            Some(_) if !kind.as_ref().is_some_and(|k| k.allow_start_anyway) => {
+                return Err(Refusal::Invalid(match &kind {
+                    Some(k) => format!(
+                        "jobs of kind {:?} may not set start_anyway_after (allow_start_anyway is false)",
+                        k.name
+                    ),
+                    None => {
+                        "start_anyway_after needs a kind that allows it (allow_start_anyway)".into()
+                    }
+                }));
+            }
+            Some(_) if in_group => {
+                return Err(Refusal::Invalid(
+                    "a job of a group starts with its group, not anyway".into(),
+                ));
+            }
+            Some(_) if !job.pinned(job.smallest()) => {
+                return Err(Refusal::Invalid(
+                    "start_anyway_after needs every need to name a node or a resource".into(),
+                ));
+            }
+            Some(d) => Some(d),
+            None if in_group || !job.pinned(job.smallest()) => None,
+            None => kind.as_ref().and_then(|k| k.start_anyway_after),
+        };
         job.kind = kind.map(|k| k.name);
         Ok(job)
     }
@@ -1128,6 +1180,10 @@ impl Service {
             wait: None,
             eta: None,
             lease: None,
+            shape: None,
+            shapes: (model.job(j).shape_count() > 1).then(|| model.job(j).shape_count()),
+            start_anyway_at: None,
+            over: false,
             outcome: None,
             done_at: None,
         };
@@ -1158,10 +1214,16 @@ impl Service {
             JobStatus::Pending | JobStatus::Queued => {
                 v.wait = Some(wait());
                 v.eta = eta;
+                v.start_anyway_at = st.start_anyway_at(model, j);
             }
             JobStatus::Running {
-                assignment, paused, ..
+                assignment,
+                paused,
+                over,
+                ..
             } => {
+                v.over = *over;
+                v.shape = v.shapes.map(|_| assignment.shape);
                 v.state = match paused {
                     Some(_) => JobState::Paused,
                     None => JobState::Running,
@@ -1177,7 +1239,7 @@ impl Service {
                     held: assignment
                         .resources
                         .iter()
-                        .zip(&model.job(j).needs)
+                        .zip(model.job(j).needs_for(assignment))
                         .enumerate()
                         .map(|(i, (r, n))| {
                             let res = model.resource(*r);
@@ -1396,7 +1458,13 @@ impl Service {
         let job_name =
             |x: JobId| format!("job {} ({})", job_ref(x), shown_name(&model.job(x).name));
         let need_kind = |need: usize| {
-            let k = model.job(j).needs[need].kind;
+            // A resume waits on the shape it runs in, a queued job on its smallest.
+            let job = model.job(j);
+            let needs = match self.auth.live().state().status(j) {
+                JobStatus::Running { assignment, .. } => job.needs_for(assignment),
+                _ => job.shape(job.smallest()).unwrap_or_default(),
+            };
+            let k = needs[need].kind;
             model.kind(k).name.clone()
         };
         let mut v = WaitView {

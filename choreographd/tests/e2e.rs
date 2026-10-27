@@ -1087,3 +1087,164 @@ options = [{ go = { nodes = ["n3"], best = 2, rank_by = "ram" } }]
         })]
     );
 }
+
+/// A build kind pinned to its node starts anyway past its wait, counted over the node's capacity and shown
+/// so; its own `start_anyway_after = "0s"` starts it at once; a kind without `allow_start_anyway` refuses
+/// one; an unpinned job of the kind waits like any other.
+#[tokio::test(start_paused = true)]
+async fn a_pinned_build_starts_anyway_past_its_wait_over_capacity() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = Svc::open(config(
+        dir.path(),
+        r#"
+[[job_kind]]
+name = "build"
+start_anyway_after = "30m"
+allow_start_anyway = true
+run = { p50 = "1h" }
+[[job_kind]]
+name = "plain"
+[lease]
+ttl = "2h"
+[settings]
+node_stale = "4h"
+queued_stale = "4h"
+"#,
+    ));
+    let (a, b, c) = (svc.client("a"), svc.client("b"), svc.client("c"));
+    svc.client("node-1")
+        .report("node-1", &room(&[("gate", 1)]))
+        .await
+        .unwrap();
+    let pinned = NeedSpec {
+        node: Some("node-1".into()),
+        ..need("gate", 1)
+    };
+    let build = |name: &str, needs: Vec<NeedSpec>, extra: serde_json::Value| -> SubmitJob {
+        let mut v = serde_json::json!({ "name": name, "kind": "build", "needs": needs });
+        v.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(v).unwrap()
+    };
+
+    let ja = a.submit(&gate("gate a")).await.unwrap();
+    assert_eq!(ja.state, JobState::Running);
+    let jb = b
+        .submit(&build(
+            "build b",
+            vec![pinned.clone()],
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(jb.state, JobState::Queued);
+    assert_eq!(jb.start_anyway_at, Some(T0 + Dur::mins(30)));
+    let free = c
+        .submit(&build(
+            "build free",
+            vec![need("gate", 1)],
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(free.start_anyway_at, None, "not pinned: it waits");
+
+    // Past its wait it starts over capacity, and the node shows the slot used twice.
+    let vb = b.wait_running(jb.id).await.unwrap();
+    assert_eq!(vb.state, JobState::Running);
+    assert_eq!(svc.daemon.now(), T0 + Dur::mins(30));
+    assert!(vb.over);
+    let q = b.queue().await.unwrap();
+    let slot = &q.nodes[0].resources[0];
+    assert_eq!((slot.capacity, slot.used), (1, 2));
+    assert!(q.running.iter().any(|j| j.id == jb.id && j.over));
+
+    // A person's "start it now": the job's own wait of 0s.
+    let now = c
+        .submit(&build(
+            "build now",
+            vec![pinned.clone()],
+            serde_json::json!({ "start_anyway_after": "0s" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(now.state, JobState::Running);
+    assert!(now.over);
+
+    // A kind that does not allow it refuses the job's own wait, and so does a job not pinned.
+    let mut plain = gate("plain");
+    plain.kind = Some("plain".into());
+    plain.start_anyway_after = Some(Dur::ZERO);
+    let e = a.submit(&plain).await.unwrap_err();
+    assert_eq!(code(e), "invalid");
+    let e = a
+        .submit(&build(
+            "unpinned now",
+            vec![need("gate", 1)],
+            serde_json::json!({ "start_anyway_after": "0s" }),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(code(e), "invalid");
+    assert_eq!(
+        c.job(free.id).await.unwrap().state,
+        JobState::Queued,
+        "the unpinned build still waits"
+    );
+    svc.stop().await;
+}
+
+/// A moldable soak asks for 4 gate slots or 2: it gets the largest that fits now, and the next job is
+/// planned around the slots it really holds.
+#[tokio::test(start_paused = true)]
+async fn a_moldable_job_gets_the_largest_shape_that_fits() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = Svc::open(config(dir.path(), ""));
+    let (a, b, c) = (svc.client("a"), svc.client("b"), svc.client("c"));
+    svc.client("node-1")
+        .report("node-1", &room(&[("gate", 4)]))
+        .await
+        .unwrap();
+    let soak = |name: &str| -> SubmitJob {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "needs": [need("gate", 4)],
+            "shapes": [[need("gate", 2)]],
+            "run": {"p50": Dur::hours(1).as_ms()},
+        }))
+        .unwrap()
+    };
+
+    let small = a.submit(&gate("gate a")).await.unwrap();
+    assert_eq!(small.state, JobState::Running);
+    let jb = b.submit(&soak("soak b")).await.unwrap();
+    assert_eq!(jb.state, JobState::Running, "2 of 4 fit: {jb:?}");
+    assert_eq!((jb.shape, jb.shapes), (Some(1), Some(2)));
+    let held: u64 = jb
+        .lease
+        .as_ref()
+        .unwrap()
+        .held
+        .iter()
+        .map(|h| h.amount)
+        .sum();
+    assert_eq!(held, 2);
+
+    // One slot is left: a one-slot gate starts beside the soak's two.
+    let jc = c.submit(&gate("gate c")).await.unwrap();
+    assert_eq!(jc.state, JobState::Running);
+    let q = c.queue().await.unwrap();
+    let slot = &q.nodes[0].resources[0];
+    assert_eq!((slot.capacity, slot.used), (4, 4));
+
+    // With the node free again a soak gets all four.
+    for (cl, j) in [(&a, &small), (&b, &jb), (&c, &jc)] {
+        cl.release(j.lease.as_ref().unwrap().token, Outcome::Ok)
+            .await
+            .unwrap();
+    }
+    let big = b.submit(&soak("soak big")).await.unwrap();
+    assert_eq!((big.state, big.shape), (JobState::Running, Some(0)));
+    svc.stop().await;
+}

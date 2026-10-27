@@ -15,11 +15,18 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
   over capacity (`State::ready_since`, `start_anyway_at`, `may_start_anyway`, `JobStatus::Running::over`,
   `plan::anyway_assignment`, `plan::wake_for_start_anyway`); the job-set key `start_anyway_after`; model errors
   `NoMatchInShape`, `EmptyShape`, `StartAnyway`; state error `NoShape` (CORE-8).
+- choreographd: `[[job_kind]]` `start_anyway_after` and `allow_start_anyway`; `SubmitJob` keys `shapes` and
+  `start_anyway_after` (refused where the kind does not allow it, or for a job not pinned or in a group);
+  `JobView` `shape`, `shapes`, `start_anyway_at` and `over`; a `build` kind in `deploy/config.example.toml`
+  (CORE-8).
+- `choreograph top` shows the shape a moldable job got (`shape 2 of 2`), a start over capacity, how many shapes
+  a queued job has and when it starts anyway (CORE-8).
 
 ### Changed
 
 - **Breaking:** `Assignment` is a struct with `resources` (the former `.0`) and `shape`; `Assignment::new`
   builds one of shape 0. Shape 0 still serializes as a bare list, so traces and journals read as before (CORE-8).
+- **Breaking:** the journal's `Op::Submit` holds a `Box<Job>`; it is written as before (CORE-8).
 
 ## [0.5.0] - 2026-10-27
 

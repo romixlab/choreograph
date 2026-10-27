@@ -45,6 +45,11 @@
 //! valid = "24h"
 //! why = "builds wait for the scheduler on this node"
 //!
+//! [[job_kind]]
+//! name = "build"
+//! start_anyway_after = "30m"  # a job pinned to a node starts anyway after this wait, over capacity
+//! allow_start_anyway = true   # a job may set its own (`"0s"`: a person's "start it now")
+//!
 //! [policy]             # the list scheduler (choreograph::Policy); every key optional
 //! aging_per_class = "1h"
 //!
@@ -179,6 +184,19 @@ pub struct JobKindConfig {
     /// win). Default: none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub budgets: Vec<BudgetSpec>,
+    /// How long a job of the kind pinned to a node (each of its needs names a node or a resource) may wait
+    /// before it starts anyway, over capacity (see [`choreograph::Job::start_anyway_after`]): a run that must
+    /// not starve. Default: none, it waits for room.
+    #[serde(
+        default,
+        deserialize_with = "crate::api::opt_dur",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub start_anyway_after: Option<Dur>,
+    /// Whether a job of the kind may set its own `start_anyway_after` (a person's "start it now" is `0s`).
+    /// Default: false, a job's own is refused.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_start_anyway: bool,
 }
 
 /// One standing instruction: for the nodes and job kind it selects, what a node may do while it can't reach
@@ -503,6 +521,12 @@ impl Config {
             if let Err(e) = choreograph::budget::check(&budgets) {
                 return bad(format!("job kind {:?}: {e}", k.name));
             }
+            if k.start_anyway_after.is_some_and(|d| d < Dur::ZERO) {
+                return bad(format!(
+                    "job kind {:?}: start_anyway_after is negative",
+                    k.name
+                ));
+            }
             if let Some(r) = k.pause_keeps.iter().find(|r| self.kind(r).is_none()) {
                 return bad(format!(
                     "job kind {:?}: pause_keeps names {r:?}, which is not a [[kind]]",
@@ -822,6 +846,9 @@ mod tests {
         assert!(c.kind("main").unwrap().shared);
         let session = c.job_kind("session").unwrap();
         assert!(session.open && session.preempt == Preempt::Ask);
+        let build = c.job_kind("build").unwrap();
+        assert_eq!(build.start_anyway_after, Some(Dur::mins(30)));
+        assert!(build.allow_start_anyway && !session.allow_start_anyway);
         let wall = session.budgets.iter().find(|b| b.name == "wall").unwrap();
         assert_eq!(
             wall.hard,
@@ -898,6 +925,10 @@ mod tests {
                 "unknown field",
             ),
             ("[[standing]]\nkind = \"b\"\nvalid = \"0s\"", "positive"),
+            (
+                "[[job_kind]]\nname = \"b\"\nstart_anyway_after = \"-5m\"",
+                "start_anyway_after",
+            ),
         ] {
             let e = Config::parse(&with_clients(&format!("{BASE}\n{extra}")))
                 .unwrap_err()

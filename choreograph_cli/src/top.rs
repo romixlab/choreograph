@@ -280,9 +280,19 @@ fn render_running(out: &mut String, color: bool, j: &JobView, now: Time) {
             relative(now, e.finish_p90)
         )
     });
+    let mut extra = String::new();
+    if let (Some(k), Some(n)) = (j.shape, j.shapes) {
+        extra.push_str(&format!("  shape {} of {n}", k + 1));
+    }
+    if j.over {
+        extra.push_str(&format!(
+            "  {}",
+            paint(color, "31", "over capacity (started anyway)")
+        ));
+    }
     let _ = writeln!(
         out,
-        "  #{}  {:?}{kind}  {}  {lease}  eta {eta}",
+        "  #{}  {:?}{kind}  {}{extra}  {lease}  eta {eta}",
         j.id, j.name, j.client
     );
 }
@@ -299,9 +309,20 @@ fn render_queued(out: &mut String, color: bool, j: &JobView, now: Time) {
             relative(now, e.start_p90)
         )
     });
+    let shapes = j.shapes.map_or(String::new(), |n| format!("  {n} shapes"));
+    let anyway = j.start_anyway_at.map_or(String::new(), |t| {
+        format!(
+            "  {}",
+            paint(
+                color,
+                "35",
+                &format!("starts anyway {}", relative(now, Some(t)))
+            )
+        )
+    });
     let _ = writeln!(
         out,
-        "  #{}  {:?}  {}  waiting: {wait}  eta {eta}",
+        "  #{}  {:?}  {}{shapes}  waiting: {wait}{anyway}  eta {eta}",
         j.id, j.name, j.client
     );
 }
@@ -390,6 +411,10 @@ mod tests {
             wait: None,
             eta: None,
             lease: None,
+            shape: None,
+            shapes: None,
+            start_anyway_at: None,
+            over: false,
             outcome: None,
             done_at: None,
         }
@@ -592,6 +617,30 @@ mod tests {
         assert!(
             r.contains(
                 "  node-a  up  gate 1/2 (+1 local)  labels=arch=x86_64  policy=-  standing #41 ends in 11h59m  local build\n"
+            ),
+            "{r}"
+        );
+    }
+
+    #[test]
+    fn moldable_and_start_anyway_jobs_say_so() {
+        let mut view = fixed_view();
+        let now = view.now;
+        view.running[0].shape = Some(1);
+        view.running[0].shapes = Some(2);
+        view.running[0].over = true;
+        view.queued[0].shapes = Some(3);
+        view.queued[0].start_anyway_at = Some(now + Dur::mins(10));
+        let r = render(&view, false);
+        assert!(
+            r.contains(
+                "  #1  \"gate a\"  node-a/a  shape 2 of 2  over capacity (started anyway)  holds node-a/gate"
+            ),
+            "{r}"
+        );
+        assert!(
+            r.contains(
+                "  #2  \"gate b\"  node-b/b  3 shapes  waiting: needs 1 gate, none free  starts anyway in 10m  eta"
             ),
             "{r}"
         );

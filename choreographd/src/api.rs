@@ -91,6 +91,20 @@ pub struct SubmitJob {
     /// What it may use under its lease (default: its kind's, else none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budgets: Option<Vec<BudgetSpec>>,
+    /// Smaller alternatives to `needs` for a moldable job, from larger to smaller (a soak on 4 channels or
+    /// on 2, a run with fewer threads): the service grants the largest that fits when it starts, and
+    /// `JobView::shape` says which. With `needs` empty, the first of them stands for `needs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shapes: Vec<Vec<NeedSpec>>,
+    /// How long it may wait before it starts anyway, over capacity, on the node or resource each of its
+    /// needs names (`"0s"`: at once). Only for a kind whose `allow_start_anyway` is true; default: its
+    /// kind's `start_anyway_after` when it is pinned so.
+    #[serde(
+        default,
+        deserialize_with = "opt_dur",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub start_anyway_after: Option<Dur>,
 }
 
 /// A budget on a job's lease (see [`choreograph::budget`]): the holder hears when it crosses a level.
@@ -229,6 +243,19 @@ pub struct JobView {
     /// Its lease, while running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease: Option<LeaseView>,
+    /// The shape of its needs it was granted, while running (0: `needs`, `k`: `shapes[k - 1]`), for a job
+    /// with several.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<usize>,
+    /// How many shapes it has, when more than one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shapes: Option<usize>,
+    /// While queued: when it starts anyway, over capacity, if it still waits then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_anyway_at: Option<Time>,
+    /// It started anyway, past its wait, counted over the capacity of what it holds.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub over: bool,
     /// How it ended, once done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<Outcome>,
@@ -475,7 +502,7 @@ fn dur<'de, D: Deserializer<'de>>(d: D) -> Result<Dur, D::Error> {
     }
 }
 
-fn opt_dur<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Dur>, D::Error> {
+pub(crate) fn opt_dur<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Dur>, D::Error> {
     dur(d).map(Some)
 }
 

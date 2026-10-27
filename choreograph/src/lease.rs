@@ -267,7 +267,7 @@ pub enum Op {
         authority: Box<Authority>,
     },
     Submit {
-        job: Job,
+        job: Box<Job>,
     },
     SubmitGroup {
         name: String,
@@ -843,7 +843,7 @@ impl Authority {
     /// See [`Live::submit`].
     pub fn submit(&mut self, job: Job) -> Result<JobId, LeaseError> {
         let id = self.live.submit(job.clone())?;
-        self.log(Op::Submit { job });
+        self.log(Op::Submit { job: Box::new(job) });
         Ok(id)
     }
 
@@ -1037,7 +1037,7 @@ impl Authority {
     fn apply(&mut self, op: Op) -> Result<bool, LeaseError> {
         match op {
             Op::Snapshot { .. } => unreachable!("handled by replay"),
-            Op::Submit { job } => self.submit(job).map(drop)?,
+            Op::Submit { job } => self.submit(*job).map(drop)?,
             Op::SubmitGroup { name, jobs } => self.submit_group(name, jobs).map(drop)?,
             Op::AddKind { name, unit } => self.add_kind(name, unit).map(drop)?,
             Op::SetSettings { settings } => self.set_settings(settings)?,

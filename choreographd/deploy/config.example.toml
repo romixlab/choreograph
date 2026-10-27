@@ -40,6 +40,14 @@ budgets = [
   { name = "wall", meter = "wall", soft = "8h", hard = "12h", on_hard = "stop" },
 ]
 
+# A build runs on the node that asked for it (its needs name that node). One that waited 30 minutes starts
+# anyway, counted over the node's capacity, so a busy node cannot starve it; a person may say "start it now"
+# with the job's own start_anyway_after = "0s".
+[[job_kind]]
+name = "build"
+start_anyway_after = "30m"
+allow_start_anyway = true
+
 [policy]
 aging_per_class = "1h"
 

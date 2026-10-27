@@ -43,7 +43,7 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   job's wait answers once it has its resources back, `give_way` on the lease and the heartbeat; `choreograph
   top` shows paused jobs, what they gave back and who is asked to give way. Tests:
   `choreograph/tests/open_ended.rs`, `choreographd/tests/e2e.rs` (`an_open_session_...`).
-- 🚧 **CORE-8 start-anyway-and-moldable**: start-anyway: `Job::start_anyway_after`, how long a job pinned to
+- ✅ **CORE-8 start-anyway-and-moldable**: start-anyway: `Job::start_anyway_after`, how long a job pinned to
   a node or resource (every need of its smallest shape names one; outside a group) may wait before it starts
   anyway, counted from when it could first start (`State::ready_since`, `start_anyway_at`,
   `may_start_anyway`); `State` lets such a start go over capacity and marks it (`JobStatus::Running::over`),
@@ -54,7 +54,13 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   estimated duration next to the reservations), and reservations, backfilling, pauses and the forecast count
   the shape a job got; a wait reason is that of the smallest shape. Job-set keys `shapes` and
   `start_anyway_after`; the example `examples/hil_moldable.toml`. Tests:
-  `choreograph/tests/start_anyway_moldable.rs`. Planned: choreographd's per-kind settings, the API and `top`.
+  `choreograph/tests/start_anyway_moldable.rs`. choreographd: `[[job_kind]]` `start_anyway_after` (applied to a
+  job of the kind pinned to its node, outside a group) and `allow_start_anyway` (a job may set its own, `"0s"`
+  for "start it now"; refused otherwise, or when the job is not pinned or in a group); `SubmitJob` keys `shapes`
+  and `start_anyway_after`; `JobView` `shape`, `shapes`, `start_anyway_at` and `over`; `choreograph top` shows
+  the shape a moldable job got, a start over capacity and when a queued job starts anyway. Tests:
+  `choreographd/tests/e2e.rs` (`a_pinned_build_starts_anyway_past_its_wait_over_capacity`,
+  `a_moldable_job_gets_the_largest_shape_that_fits`).
 - 📋 **EST-3 learned-needs**: needs learned per job kind from the peaks holders report (an open-ended session's
   RAM), as its run length is learned today (CORE-6).
 - 🚧 **EXEC-1 executor-state-machine**: done: leases (`lease.rs`): `Authority` owns a `Live` and grants every
