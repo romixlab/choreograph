@@ -207,8 +207,13 @@ impl Standing {
     /// The same instructions, whatever the serial and issue time: a service gives a new serial only when this
     /// changes.
     pub fn same_rules(&self, o: &Standing) -> bool {
-        (&self.node, &self.api, self.valid_ms, &self.kinds, &self.other)
-            == (&o.node, &o.api, o.valid_ms, &o.kinds, &o.other)
+        (
+            &self.node,
+            &self.api,
+            self.valid_ms,
+            &self.kinds,
+            &self.other,
+        ) == (&o.node, &o.api, o.valid_ms, &o.kinds, &o.other)
     }
 
     /// The pools a job of `kind` counts in: each local option's pool, the kind's own name when it names none.
@@ -331,10 +336,7 @@ fn fits(
 
 /// The share of the room a local option gives a resource kind, per mille; None: not limited.
 pub fn share_of(l: &Local, kind: &str) -> Option<u32> {
-    l.share
-        .get(kind)
-        .or_else(|| l.share.get(ANY_KIND))
-        .copied()
+    l.share.get(kind).or_else(|| l.share.get(ANY_KIND)).copied()
 }
 
 fn min_some(a: Option<u64>, b: Option<u64>) -> Option<u64> {
@@ -573,7 +575,10 @@ mod tests {
             arb_needs(),
             any::<bool>(),
             prop::collection::vec(
-                (prop::sample::select(vec!["build", "dist", "gate"]), arb_needs()),
+                (
+                    prop::sample::select(vec!["build", "dist", "gate"]),
+                    arb_needs(),
+                ),
                 0..5,
             ),
         )

@@ -832,3 +832,258 @@ node_stale = "4h"
     b.release(lb.token, Outcome::Ok).await.unwrap();
     svc.stop().await;
 }
+
+/// Standing instructions for the tests: builds on build nodes run there, gates go to the node with the most
+/// free RAM, and node-2 waits for everything.
+const STANDING: &str = r#"
+[[standing]]
+node_labels = { builds = "true" }
+kind = "build"
+options = [{ local = { max = 2, share = { ram = 800 }, pressure = true } }]
+valid = "12h"
+why = "builds wait for the scheduler on this node"
+
+[[standing]]
+kind = "gate"
+options = [{ go = { best = 2, rank_by = "ram" } }]
+valid = "2h"
+
+[[standing]]
+node = "node-2"
+kind = "*"
+why = "everything waits for the scheduler on node-2"
+"#;
+
+fn labelled(r: NodeReport, labels: &[(&str, &str)]) -> NodeReport {
+    NodeReport {
+        labels: labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        ..r
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_report_answer_carries_the_standing_instruction() {
+    use choreograph::standing::{Choice, LocalView, Verdict, decide};
+    let dir = tempfile::tempdir().unwrap();
+    let svc = Svc::open(config(dir.path(), STANDING));
+    let (n1, n2) = (svc.client("node-1"), svc.client("node-2"));
+    let gib = 1u64 << 30;
+    let r1 = labelled(room(&[("ram", 16 * gib)]), &[("builds", "true")]);
+    n2.report("node-2", &room(&[("ram", 8 * gib)]))
+        .await
+        .unwrap();
+    let v = n1.report("node-1", &r1).await.unwrap();
+    let s = v.standing.expect("every report answer carries one");
+    assert_eq!((s.node.as_str(), s.api.as_str()), ("node-1", "v1"));
+    assert!(
+        s.serial >= T0.ms() as u64,
+        "a serial is at least the issue time"
+    );
+    assert_eq!(s.valid_ms, Some(Dur::hours(12).as_ms() as u64));
+    let Choice::Local(l) = &s.kinds["build"].options[0] else {
+        panic!("{s:?}")
+    };
+    assert_eq!((l.max, l.share["ram"], l.pressure), (2, 800, true));
+    // The go list is filled from the live view: node-2, never node-1 itself.
+    assert_eq!(
+        s.kinds["gate"].options,
+        vec![Choice::Go(choreograph::standing::Go {
+            nodes: vec!["node-2".into()]
+        })]
+    );
+    assert!(s.other.options.is_empty());
+
+    // The node decides with it while the service is away; the hours count from its own receipt.
+    let got = Time(5);
+    let view = LocalView {
+        room: [("ram".to_string(), 16 * gib)].into(),
+        ..LocalView::default()
+    };
+    let needs = [("ram".to_string(), 4 * gib)].into();
+    assert_eq!(
+        decide(&s, got, Time(1000), "build", &needs, &view, &[]),
+        Verdict::Run { choice: 0 }
+    );
+    assert!(matches!(
+        decide(&s, got, Time(1000), "gate", &needs, &view, &[]),
+        Verdict::Go { node, .. } if node == "node-2"
+    ));
+    assert_eq!(
+        decide(&s, got, got + Dur::hours(3), "gate", &needs, &view, &[]),
+        Verdict::Expired {
+            at: got + Dur::hours(2)
+        }
+    );
+
+    // Unchanged, it keeps its serial, in a report answer and on its own.
+    sleep(Dur::secs(30).to_std()).await;
+    let again = n1.report("node-1", &r1).await.unwrap().standing.unwrap();
+    assert_eq!((again.serial, again.issued), (s.serial, s.issued));
+    assert_eq!(n2.standing("node-1").await.unwrap(), s);
+    assert_eq!(code(n1.standing("node-9").await.unwrap_err()), "not_found");
+
+    // node-2's own "*" entry beats the gate entry for every node: it waits for everything.
+    let s2 = n2.standing("node-2").await.unwrap();
+    assert!(s2.kinds.is_empty(), "{s2:?}");
+    assert!(matches!(
+        decide(&s2, got, Time(1000), "gate", &needs, &view, &[]),
+        Verdict::Wait { why, .. } if why == "everything waits for the scheduler on node-2"
+    ));
+
+    // A label changes: a new, higher serial, without the build rule.
+    let changed = n1
+        .report("node-1", &room(&[("ram", 16 * gib)]))
+        .await
+        .unwrap()
+        .standing
+        .unwrap();
+    assert!(changed.serial > s.serial);
+    assert!(!changed.kinds.contains_key("build"));
+    assert!(matches!(
+        decide(&changed, got, Time(1000), "build", &needs, &view, &[]),
+        Verdict::Wait { .. }
+    ));
+    svc.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_jobs_are_counted_after_a_reconnect() {
+    use choreograph::standing::LocalJob;
+    let dir = tempfile::tempdir().unwrap();
+    let gib = 1u64 << 30;
+    let r1 = labelled(room(&[("ram", 16 * gib)]), &[("builds", "true")]);
+    let svc = Svc::open(config(dir.path(), STANDING));
+    let before = svc
+        .client("node-1")
+        .report("node-1", &r1)
+        .await
+        .unwrap()
+        .standing
+        .unwrap();
+    svc.stop().await;
+
+    // The service was away for an hour; the node ran a build under its standing meanwhile.
+    let svc = Svc::with(
+        Daemon::open(config(dir.path(), STANDING), Clock::new(T0 + Dur::hours(1))).unwrap(),
+    );
+    let (a, n1) = (svc.client("a"), svc.client("node-1"));
+    let build = LocalJob {
+        kind: "build".into(),
+        needs: [("ram".to_string(), 10 * gib)].into(),
+        since: T0 + Dur::mins(20),
+    };
+    let with_local = NodeReport {
+        local: vec![build.clone()],
+        ..r1.clone()
+    };
+    let v = n1.report("node-1", &with_local).await.unwrap();
+    assert!(
+        v.standing.unwrap().serial > before.serial,
+        "serials grow across restarts"
+    );
+    assert_eq!(v.local, vec![build]);
+    let ram = &v.resources[0];
+    assert_eq!((ram.capacity, ram.local), (6 * gib, 10 * gib), "{ram:?}");
+
+    // The room it holds is not handed out twice.
+    let j = a
+        .submit(&job("build", vec![need("ram", 8 * gib)], Dur::mins(5)))
+        .await
+        .unwrap();
+    assert_eq!(j.state, JobState::Queued);
+    assert_eq!(j.wait.as_ref().unwrap().why, "capacity", "{:?}", j.wait);
+
+    // A local job of a kind the service doesn't know is refused, like room of one.
+    let bad = NodeReport {
+        local: vec![LocalJob {
+            kind: "build".into(),
+            needs: [("disk".to_string(), 1)].into(),
+            since: T0,
+        }],
+        ..r1.clone()
+    };
+    assert_eq!(
+        code(n1.report("node-1", &bad).await.unwrap_err()),
+        "invalid"
+    );
+
+    // The local build ends: the next report leaves it out, and the queued job starts.
+    let v = n1.report("node-1", &r1).await.unwrap();
+    assert!(v.local.is_empty());
+    assert_eq!(a.wait_running(j.id).await.unwrap().state, JobState::Running);
+    svc.stop().await;
+}
+
+#[test]
+fn the_most_specific_standing_entry_wins_and_go_picks_from_the_live_view() {
+    use choreograph::standing::{Choice, Go};
+    use choreographd::service::Service;
+    let config = Config::parse(
+        r#"
+state_dir = "/nonexistent"
+[[kind]]
+name = "ram"
+[[standing]]
+kind = "build"
+why = "every node"
+[[standing]]
+node_labels = { a = "1" }
+kind = "build"
+why = "one label"
+[[standing]]
+node_labels = { a = "1", b = "1" }
+kind = "build"
+why = "two labels, first"
+[[standing]]
+node_labels = { b = "1", c = "1" }
+kind = "build"
+why = "two labels, second"
+[[standing]]
+node = "n4"
+kind = "*"
+why = "n4 itself"
+[[standing]]
+kind = "gate"
+options = [{ go = { nodes = ["n3"], best = 2, rank_by = "ram" } }]
+"#,
+    )
+    .unwrap();
+    let mut s = Service::in_memory(config, T0);
+    let c = s.caller(None, None).unwrap();
+    let report = |labels: &[(&str, &str)], policy: &[(&str, &str)], ram: u64, up: bool| {
+        let mut r = labelled(room(&[("ram", ram)]), labels);
+        r.policy = policy
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        r.up = up;
+        r
+    };
+    let all = [("a", "1"), ("b", "1"), ("c", "1")];
+    s.report(&c, "n1", report(&all, &[], 10, true), T0).unwrap();
+    s.report(&c, "n2", report(&[("a", "1")], &[], 30, true), T0)
+        .unwrap();
+    s.report(&c, "n3", report(&[], &[], 50, true), T0).unwrap();
+    s.report(&c, "n4", report(&[], &[], 90, true), T0).unwrap();
+    // Most free RAM, but keeps work away unless asked for: never picked.
+    s.report(&c, "n5", report(&[], &[("builds", "false")], 99, true), T0)
+        .unwrap();
+    // Drained: never picked.
+    s.report(&c, "n6", report(&[], &[], 80, false), T0).unwrap();
+
+    let why = |s: &mut Service, n: &str| s.standing(n).unwrap().rule("build").why.clone();
+    assert_eq!(why(&mut s, "n1"), "two labels, first");
+    assert_eq!(why(&mut s, "n2"), "one label");
+    assert_eq!(why(&mut s, "n3"), "every node");
+    assert_eq!(why(&mut s, "n4"), "n4 itself", "a node over its kind");
+    // Named nodes first, then the most free RAM among the rest: n4 (90), n2 (30); never n1 itself.
+    assert_eq!(
+        s.standing("n1").unwrap().rule("gate").options,
+        vec![Choice::Go(Go {
+            nodes: vec!["n3".into(), "n4".into(), "n2".into()]
+        })]
+    );
+}

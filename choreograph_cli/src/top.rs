@@ -153,7 +153,7 @@ pub fn render(view: &QueueView, color: bool) -> String {
         let _ = writeln!(out, "  (none reported yet)");
     }
     for n in &view.nodes {
-        render_node(&mut out, color, n);
+        render_node(&mut out, color, n, view.now);
     }
 
     let _ = writeln!(out, "\n{}", bold(color, "RUNNING"));
@@ -181,7 +181,7 @@ pub fn render(view: &QueueView, color: bool) -> String {
     out
 }
 
-fn render_node(out: &mut String, color: bool, n: &NodeView) {
+fn render_node(out: &mut String, color: bool, n: &NodeView, now: Time) {
     let state = if n.up {
         paint(color, "32", "up")
     } else {
@@ -192,15 +192,37 @@ fn render_node(out: &mut String, color: bool, n: &NodeView) {
     } else {
         n.resources
             .iter()
-            .map(|r| format!("{} {}/{}", r.name, r.used, r.capacity))
+            .map(|r| {
+                let local = if r.local > 0 {
+                    format!(" (+{} local)", r.local)
+                } else {
+                    String::new()
+                };
+                format!("{} {}/{}{local}", r.name, r.used, r.capacity)
+            })
             .collect::<Vec<_>>()
             .join("  ")
     };
     let labels = fmt_labels(&n.labels);
     let policy = fmt_labels(&n.policy);
+    // The node got its standing instruction with its last report: it runs out that long after.
+    let standing = n.standing.as_ref().map_or(String::new(), |s| {
+        let ends = match (s.valid_ms, n.reported) {
+            (Some(ms), Some(got)) => relative(now, Some(got + Dur(ms as i64))),
+            (Some(ms), None) => format!("{} after receipt", Dur(ms as i64)),
+            (None, _) => "never".into(),
+        };
+        format!("  standing #{} ends {ends}", s.serial)
+    });
+    let local = if n.local.is_empty() {
+        String::new()
+    } else {
+        let kinds: Vec<&str> = n.local.iter().map(|j| j.kind.as_str()).collect();
+        format!("  local {}", kinds.join(", "))
+    };
     let _ = writeln!(
         out,
-        "  {}  {state}  {resources}  labels={labels}  policy={policy}",
+        "  {}  {state}  {resources}  labels={labels}  policy={policy}{standing}{local}",
         n.name
     );
 }
@@ -386,8 +408,11 @@ mod tests {
                 kind: "gate".into(),
                 capacity: 2,
                 used: 1,
+                local: 0,
                 holders: vec![1],
             }],
+            local: vec![],
+            standing: None,
         };
         let node_b = NodeView {
             name: "node-b".into(),
@@ -396,6 +421,8 @@ mod tests {
             policy: Default::default(),
             reported: Some(now),
             resources: vec![],
+            local: vec![],
+            standing: None,
         };
         let mut running = job(1, "gate a", "node-a/a", JobState::Running);
         running.lease = Some(LeaseView {
@@ -540,6 +567,31 @@ mod tests {
         assert!(
             r.contains(
                 "heartbeat within 50s  step 3  context past soft 160/150  asked to give way"
+            ),
+            "{r}"
+        );
+    }
+
+    #[test]
+    fn a_node_shows_its_standing_and_local_jobs() {
+        let mut view = fixed_view();
+        let now = view.now;
+        let a = &mut view.nodes[0];
+        let mut s = choreograph::standing::Standing::lone("node-a");
+        s.serial = 41;
+        s.valid_ms = Some(Dur::hours(12).as_ms() as u64);
+        a.reported = Some(now - Dur::mins(1));
+        a.standing = Some(s);
+        a.resources[0].local = 1;
+        a.local = vec![choreograph::standing::LocalJob {
+            kind: "build".into(),
+            needs: [("gate".to_string(), 1)].into(),
+            since: now,
+        }];
+        let r = render(&view, false);
+        assert!(
+            r.contains(
+                "  node-a  up  gate 1/2 (+1 local)  labels=arch=x86_64  policy=-  standing #41 ends in 11h59m  local build\n"
             ),
             "{r}"
         );

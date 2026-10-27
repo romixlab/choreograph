@@ -17,12 +17,14 @@ use choreograph::{
     ModelBuilder, Need, Outcome, ResourceId, Time, Token, WaitReason,
 };
 
+use choreograph::standing::{self, LocalJob, Standing};
+
 use crate::api::{
-    BeatView, EstimateSpec, EtaView, HeldView, JobRef, JobState, JobView, LeaseView, NeedSpec,
-    NodeReport, NodeView, QueueView, ResourceView, SubmitGroup, SubmitJob, TellJob, UsageView,
-    UseReport, WaitView, WakeView,
+    API_VERSION, BeatView, EstimateSpec, EtaView, HeldView, JobRef, JobState, JobView, LeaseView,
+    NeedSpec, NodeReport, NodeView, QueueView, ResourceView, SubmitGroup, SubmitJob, TellJob,
+    UsageView, UseReport, WaitView, WakeView,
 };
-use crate::config::{ClientConfig, Config, JobKindConfig};
+use crate::config::{ClientConfig, Config, GoConfig, JobKindConfig, OptionConfig, StandingConfig};
 use crate::store::{JobMeta, Line, STATE_VERSION, Store, StoreError};
 
 /// Why a call was refused. Maps to an HTTP status and an [`ApiError`](crate::api::ApiError) code.
@@ -126,6 +128,10 @@ pub struct Service {
     away: BTreeSet<JobRef>,
     /// When each node last reported (since this start).
     reported: BTreeMap<String, Time>,
+    /// The jobs each node last reported running under its standing instruction.
+    local: BTreeMap<String, Vec<LocalJob>>,
+    /// The standing instruction last handed to each node (since this start).
+    issued: BTreeMap<String, Standing>,
     /// The last plan's wait reasons.
     waits: BTreeMap<JobRef, WaitView>,
     /// When the last plan wants to be asked again.
@@ -210,6 +216,8 @@ impl Service {
             seen,
             away: BTreeSet::new(),
             reported,
+            local: BTreeMap::new(),
+            issued: BTreeMap::new(),
             waits: BTreeMap::new(),
             wake_at: None,
             last_compact: now,
@@ -537,7 +545,22 @@ impl Service {
                 "node {node:?}: a name without '/'"
             )));
         }
-        for k in r.room.keys() {
+        let mut local: BTreeMap<&str, u64> = BTreeMap::new();
+        for j in &r.local {
+            if j.kind.is_empty() {
+                return Err(Refusal::Invalid("a local job needs its kind".into()));
+            }
+            for (k, a) in &j.needs {
+                let e = local.entry(k.as_str()).or_default();
+                *e = e.saturating_add(*a);
+            }
+        }
+        for k in r
+            .room
+            .keys()
+            .map(String::as_str)
+            .chain(local.keys().copied())
+        {
             match self.config.kind(k) {
                 None => return Err(Refusal::Invalid(format!("unknown kind {k:?}"))),
                 Some(c) if c.shared => {
@@ -579,35 +602,51 @@ impl Service {
                 ))
             })
             .collect();
+        // Jobs run under the standing instruction hold their part of the room: what is left is planned with.
         for (name, kind) in kinds {
             let room = r.room.get(&name).copied().unwrap_or(0);
+            let free = room.saturating_sub(local.get(name.as_str()).copied().unwrap_or(0));
             let rname = format!("{node}/{name}");
-            match self.auth.live().model().resource_by_name(&rname) {
-                None if room == 0 => {}
-                None => {
-                    self.auth.add_resource(Resource {
-                        name: rname,
-                        kind,
-                        node: n,
-                        capacity: room,
-                        labels: Labels::new(),
-                        states: None,
-                    })?;
-                }
-                Some(rid) => {
-                    let st = self.auth.live().state();
-                    if st.capacity(self.auth.live().model(), rid) != room
-                        || st.measured(rid).is_none()
-                    {
-                        self.auth.set_capacity(rid, Some(room))?;
-                    }
-                }
+            let rid = match self.auth.live().model().resource_by_name(&rname) {
+                None if room == 0 => continue,
+                None => self.auth.add_resource(Resource {
+                    name: rname,
+                    kind,
+                    node: n,
+                    capacity: room,
+                    labels: Labels::new(),
+                    states: None,
+                })?,
+                Some(rid) => rid,
+            };
+            let st = self.auth.live().state();
+            if st.capacity(self.auth.live().model(), rid) != free || st.measured(rid).is_none() {
+                self.auth.set_capacity(rid, Some(free))?;
             }
         }
         self.reported.insert(node.to_string(), now.max(self.now()));
+        if r.local.is_empty() {
+            self.local.remove(node);
+        } else {
+            self.local.insert(node.to_string(), r.local);
+        }
         self.schedule(now);
         self.end()?;
+        self.issue(n);
         Ok(self.node_view(n))
+    }
+
+    /// A node's current standing instruction (made afresh from the configuration and the live view; a new
+    /// serial only when it changed).
+    pub fn standing(&mut self, node: &str) -> Result<Standing, Refusal> {
+        let n = self
+            .auth
+            .live()
+            .model()
+            .node_by_name(node)
+            .filter(|_| node != self.config.settings.shared_node)
+            .ok_or_else(|| Refusal::NotFound(format!("no node {node:?}: it has not reported")))?;
+        Ok(self.issue(n))
     }
 
     /// The whole picture.
@@ -1168,6 +1207,149 @@ impl Service {
         v
     }
 
+    /// Makes node `n`'s standing instruction and keeps it; it gets a new serial when it differs from the last
+    /// one handed out. A serial is the service's clock in milliseconds when it changed (one more than the last
+    /// when that is not higher), so it grows across restarts without being stored.
+    fn issue(&mut self, n: NodeId) -> Standing {
+        let mut s = self.make_standing(n);
+        let now = self.now();
+        match self.issued.get(&s.node) {
+            Some(old) if old.same_rules(&s) => old.clone(),
+            old => {
+                let next = old.map_or(0, |o| o.serial.saturating_add(1));
+                s.serial = next.max(u64::try_from(now.ms()).unwrap_or(0));
+                s.issued = now;
+                self.issued.insert(s.node.clone(), s.clone());
+                s
+            }
+        }
+    }
+
+    /// Node `n`'s standing instruction from the `[[standing]]` entries that select it (serial and time left
+    /// for [`Service::issue`]).
+    fn make_standing(&self, n: NodeId) -> Standing {
+        let node = self.auth.live().model().node(n);
+        let selected: Vec<(usize, &StandingConfig)> = self
+            .config
+            .standing
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.selects(&node.name, &node.labels, &node.policy))
+            .collect();
+        // The most specific entry for a kind: node selector first, then kind over "*", then file order.
+        let best = |kind: &str| {
+            selected
+                .iter()
+                .filter(|(_, e)| e.kind == kind || e.kind == "*")
+                .max_by_key(|(i, e)| (e.specificity(), e.kind != "*", std::cmp::Reverse(*i)))
+                .copied()
+        };
+        let default_valid = self.config.settings.standing_valid.as_ms().max(0) as u64;
+        let other_entry = best("*");
+        let other = match other_entry {
+            Some((_, e)) => self.rule(e, n),
+            None => standing::Rule {
+                options: Vec::new(),
+                valid_ms: None,
+                why: format!("no standing instruction for this kind on {}", node.name),
+            },
+        };
+        let mut kinds = BTreeMap::new();
+        for (_, e) in &selected {
+            if e.kind == "*" || kinds.contains_key(&e.kind) {
+                continue;
+            }
+            let (i, chosen) = best(&e.kind).expect("the entry itself matches");
+            if other_entry.is_some_and(|(o, _)| o == i) {
+                continue;
+            }
+            kinds.insert(e.kind.clone(), self.rule(chosen, n));
+        }
+        let valid = kinds
+            .values()
+            .chain([&other])
+            .filter_map(|r: &standing::Rule| r.valid_ms)
+            .max()
+            .unwrap_or(default_valid);
+        Standing {
+            node: node.name.clone(),
+            serial: 0,
+            api: API_VERSION.into(),
+            issued: Time::ZERO,
+            valid_ms: Some(valid),
+            kinds,
+            other,
+        }
+    }
+
+    /// One `[[standing]]` entry as a rule for node `n`, its `go` lists filled from the live view.
+    fn rule(&self, e: &StandingConfig, n: NodeId) -> standing::Rule {
+        let valid = e.valid.unwrap_or(self.config.settings.standing_valid);
+        standing::Rule {
+            options: e
+                .options
+                .iter()
+                .map(|o| match o {
+                    OptionConfig::Local(l) => standing::Choice::Local(standing::Local {
+                        max: l.max.unwrap_or(u32::MAX),
+                        pool: l.pool.clone(),
+                        share: l.share.clone(),
+                        pressure: l.pressure,
+                        max_run: l.max_run,
+                        exclusive: l.exclusive.clone(),
+                    }),
+                    OptionConfig::Go(g) => standing::Choice::Go(standing::Go {
+                        nodes: self.go_nodes(g, n),
+                    }),
+                })
+                .collect(),
+            valid_ms: Some(valid.as_ms().max(0) as u64),
+            why: e.why.clone(),
+        }
+    }
+
+    /// Where a `go` option sends jobs from node `n`: its named nodes, then up to `best` picked ones (up, with
+    /// its labels, any policy label tolerated, most free `rank_by` first, then by name).
+    fn go_nodes(&self, g: &GoConfig, n: NodeId) -> Vec<String> {
+        let live = self.auth.live();
+        let (model, st) = (live.model(), live.state());
+        let me = &model.node(n).name;
+        let mut out: Vec<String> = g.nodes.iter().filter(|x| *x != me).cloned().collect();
+        if g.best == 0 {
+            return out;
+        }
+        let free = |id: NodeId| -> u64 {
+            let Some(kind) = &g.rank_by else { return 0 };
+            model
+                .resource_by_name(&format!("{}/{kind}", model.node(id).name))
+                .map_or(0, |r| st.capacity(model, r).saturating_sub(st.used(r)))
+        };
+        let mut picks: Vec<(u64, &str)> = (0..model.nodes().len())
+            .map(|i| NodeId(i as u32))
+            .filter(|&id| id != n && st.node_up(id))
+            .filter_map(|id| {
+                let x = model.node(id);
+                let fits = x.name != self.config.settings.shared_node
+                    && !out.contains(&x.name)
+                    && g.node_labels
+                        .iter()
+                        .all(|(k, v)| x.labels.get(k) == Some(v) || x.policy.get(k) == Some(v))
+                    && x.policy.iter().all(|(k, v)| {
+                        g.node_labels.get(k) == Some(v) || g.tolerate.get(k) == Some(v)
+                    });
+                fits.then(|| (free(id), x.name.as_str()))
+            })
+            .collect();
+        picks.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+        out.extend(
+            picks
+                .into_iter()
+                .take(g.best as usize)
+                .map(|(_, x)| x.to_string()),
+        );
+        out
+    }
+
     fn node_view(&self, n: NodeId) -> NodeView {
         let live = self.auth.live();
         let (model, st) = (live.model(), live.state());
@@ -1178,6 +1360,8 @@ impl Service {
             labels: node.labels.clone(),
             policy: node.policy.clone(),
             reported: self.reported.get(&node.name).copied(),
+            local: self.local.get(&node.name).cloned().unwrap_or_default(),
+            standing: self.issued.get(&node.name).cloned(),
             resources: model
                 .resource_ids()
                 .filter(|r| model.resource(*r).node == n)
@@ -1188,6 +1372,12 @@ impl Service {
                         kind: model.kind(res.kind).name.clone(),
                         capacity: st.capacity(model, r),
                         used: st.used(r),
+                        local: self.local.get(&node.name).map_or(0, |js| {
+                            let k = &model.kind(res.kind).name;
+                            js.iter()
+                                .filter_map(|j| j.needs.get(k))
+                                .fold(0, |a, b| a.saturating_add(*b))
+                        }),
                         holders: st
                             .holders(r)
                             .map(|(j, _)| self.jobs[j.index()].id)

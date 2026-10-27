@@ -163,6 +163,24 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   (`choreographd/deploy/`) that restarts with a growing pause and stops on exit 78. Tests:
   `choreographd/tests/e2e.rs` (several clients on paused time), `choreographd/tests/tls.rs`,
   `choreographd/tests/unix.rs`.
+- ✅ **SVC-3 standing-instructions**: what a node may do while it can't reach the service, handed out ahead of
+  time. The library's `standing.rs`: `Standing` (per job kind a `Rule`, the options in order, then wait; a
+  serial, the API it was made for, a validity counted from the node's own receipt, so a skewed clock neither
+  shortens nor stretches it), `Choice::Local` (at most `max` at once per pool, a per-mille share of the room
+  per resource kind, held back under pressure, `max_run`, an `exclusive` lock the client provides) and
+  `Choice::Go` (other nodes in order), and the pure `decide` every node applies (`Run`, `Go`, `Wait` with the
+  reasons, `Expired`); `Standing::lone` for a node with no scheduler, which never runs out. In `choreographd`:
+  `[[standing]]` entries in the configuration (selected by `node` or `node_labels` and a job `kind` or `"*"`,
+  the most specific winning; `local` and `go` options, `go.best` filled at issue from the live view: up, the
+  labels, policy labels tolerated, most free `rank_by` first; `valid`, `why`; `settings.standing_valid`),
+  `NodeView::standing` on every report's answer and `GET /v1/nodes/{name}/standing` (`Client::standing`), a
+  new serial only when the instruction changes (the service's clock at the change, so it grows across
+  restarts), `NodeReport::local` (jobs run under a standing instruction, taken off the node's room until a
+  report leaves them out; `ResourceView::local`); `choreograph top` shows each node's serial, when its
+  instruction runs out and its local jobs. Examples: `choreographd/deploy/config.build-fleet.example.toml`,
+  `config.hil-bench.example.toml`. Tests: `standing.rs` (proptests: never over `max` or a share, expired
+  always waits, lone never runs out), `choreographd/tests/e2e.rs` (`a_report_answer_carries_...`,
+  `local_jobs_are_counted_after_a_reconnect`, `the_most_specific_standing_entry_...`).
 
 ## SESS: long sessions on leases
 

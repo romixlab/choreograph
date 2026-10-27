@@ -65,12 +65,14 @@ block); a listener beyond loopback is refused without both.
 | pause / go on (open-ended jobs) | `POST /v1/leases/{token}/pause`, `POST /v1/leases/{token}/resume` |
 | report use against its budgets / restart in place | `POST /v1/leases/{token}/usage`, `POST /v1/leases/{token}/restart` |
 | tell a running job's holder | `POST /v1/jobs/{id}/tell` |
-| report a node | `POST /v1/nodes/{name}` |
+| report a node (the answer carries its standing instruction) | `POST /v1/nodes/{name}` |
+| a node's standing instruction: what it may do while it can't reach the service | `GET /v1/nodes/{name}/standing` |
 | the queue | `GET /v1/queue` |
 | is it up (no token) | `GET /v1/health` |
 
-Example configurations (`config.example.toml` on the socket, `config.tls.example.toml` with TLS and tokens)
-and a systemd unit are in [`choreographd/deploy`](choreographd/deploy). The unit
+Example configurations (`config.example.toml` on the socket, `config.tls.example.toml` with TLS and tokens,
+`config.build-fleet.example.toml` and `config.hil-bench.example.toml` with standing instructions) and a systemd
+unit are in [`choreographd/deploy`](choreographd/deploy). The unit
 restarts with a growing pause, gives up after a few fast failures, and does not restart on exit code 78, which
 the service uses for what only a person can fix (a bad configuration, unusable TLS files, a journal that is
 unreadable or written by a newer version).

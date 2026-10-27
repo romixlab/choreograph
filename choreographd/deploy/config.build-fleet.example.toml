@@ -1,0 +1,66 @@
+# An example choreographd configuration for a few build machines, with standing instructions: what each
+# machine may do on its own while it can't reach the service (the service's machine is down, the network
+# is). Every report's answer carries the machine's current instruction; the machine keeps the newest and counts
+# its validity from when it arrived. Jobs it runs under it are reported back (`local`) and counted as used
+# until they end. Every key is described in the crate docs (choreographd::config).
+
+listen = "/run/choreographd/api.sock"
+state_dir = "/var/lib/choreographd"
+
+[[kind]]
+name = "ram"
+unit = "bytes"
+
+[[kind]]
+name = "cores"
+unit = "millicores"
+
+[[kind]]
+name = "gate"   # test-gate slots
+
+# On a build machine: builds and bundles keep running there, together at most 80% of its memory and never
+# while it is under memory pressure, for half a day.
+[[standing]]
+node_labels = { builds = "true" }
+kind = "build"
+options = [{ local = { pool = "heavy", share = { ram = 800, cores = 1000 }, pressure = true } }]
+valid = "12h"
+why = "builds wait for the scheduler on this machine"
+
+[[standing]]
+node_labels = { builds = "true" }
+kind = "dist"
+options = [{ local = { max = 1, pool = "heavy", share = { ram = 800 }, pressure = true } }]
+valid = "12h"
+
+# One test gate at a time on a build machine.
+[[standing]]
+node_labels = { builds = "true" }
+kind = "gate"
+options = [{ local = { max = 1 } }]
+valid = "12h"
+
+# Anywhere else, a gate goes to the build machines with the most free memory when the instruction was
+# made. That list goes stale as the room changes: two hours, then gates wait.
+[[standing]]
+kind = "gate"
+options = [{ go = { best = 3, node_labels = { builds = "true" }, rank_by = "ram" } }]
+valid = "2h"
+why = "gates wait for the scheduler"
+
+# Landing on the main branch: one at a time across all machines, through a lock the client keeps.
+[[standing]]
+kind = "land"
+options = [{ local = { max = 1, exclusive = "land" } }]
+valid = "12h"
+
+# A laptop off the network for days builds and tests on its own, for a week.
+[[standing]]
+node_labels = { portable = "true" }
+kind = "*"
+options = [{ local = { max = 2, share = { "*" = 700 }, pressure = true } }]
+valid = "7d"
+why = "a week away is the most this laptop runs without the scheduler"
+
+[settings]
+standing_valid = "12h"   # for an entry without its own valid

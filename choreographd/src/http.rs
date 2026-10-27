@@ -52,6 +52,7 @@ pub fn router(d: Daemon) -> Router {
         .route("/v1/leases/{token}/restart", post(restart))
         .route("/v1/jobs/{id}/tell", post(tell))
         .route("/v1/nodes/{name}", post(report))
+        .route("/v1/nodes/{name}/standing", get(standing))
         .route("/v1/queue", get(queue))
         .fallback(|| async { Fail::new(StatusCode::NOT_FOUND, "not_found", "no such route") })
         .layer(DefaultBodyLimit::max(limit))
@@ -325,6 +326,16 @@ async fn report(
     let Path(name) = name?;
     let r: NodeReport = body(b)?;
     Ok(axum::Json(d.call(|s, now| s.report(&c, &name, r, now))?))
+}
+
+async fn standing(
+    State(d): State<Daemon>,
+    h: HeaderMap,
+    name: Result<Path<String>, PathRejection>,
+) -> Answer<crate::api::Standing> {
+    client(&d, &h)?;
+    let Path(name) = name?;
+    Ok(axum::Json(d.look(|s, _| s.standing(&name))?))
 }
 
 async fn queue(State(d): State<Daemon>, h: HeaderMap) -> Answer<crate::api::QueueView> {

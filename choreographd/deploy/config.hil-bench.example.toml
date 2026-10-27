@@ -1,0 +1,44 @@
+# An example choreographd configuration for hardware-in-the-loop test benches, with standing instructions:
+# what a bench controller may do while it can't reach the service. A soak test already under way finishes
+# (its process holds the bench); a new one may start only within the night, on at most half the channels,
+# and each runs at most four hours. Flashing a board waits for the service: two controllers must never
+# flash the same board. Every key is described in the crate docs (choreographd::config).
+
+listen = "/run/choreographd/api.sock"
+state_dir = "/var/lib/choreographd"
+
+[[kind]]
+name = "channels"   # measurement channels on a bench
+
+[[kind]]
+name = "supply"     # programmable supplies
+
+[[job_kind]]
+name = "soak"
+open = true
+preempt = "ask"
+
+[[standing]]
+node_labels = { bench = "true" }
+kind = "soak"
+options = [{ local = { max = 1, share = { channels = 500, supply = 1000 }, max_run = "4h" } }]
+valid = "10h"
+why = "soak tests wait for the scheduler on this bench"
+
+# A short smoke test may run on a spare bench of the same type instead.
+[[standing]]
+node_labels = { bench = "true" }
+kind = "smoke"
+options = [
+  { local = { max = 1, share = { channels = 250 }, max_run = "15m" } },
+  { go = { best = 1, node_labels = { bench = "true" }, rank_by = "channels" } },
+]
+valid = "1h"
+
+[[standing]]
+kind = "flash"
+why = "flashing waits for the scheduler: one controller per board"
+
+[[standing]]
+kind = "*"
+why = "this bench waits for the scheduler"

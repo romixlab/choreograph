@@ -11,6 +11,19 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
   `LocalJob`, `Verdict`): what a node may do while it can't reach the scheduler, handed out ahead of time, and
   the pure `standing::decide` that applies them (run here within a count and a share of the room, go to another
   node, wait, or ran out); `Standing::lone` for a node with no scheduler (SVC-3).
+- choreographd: `[[standing]]` entries in the configuration (`node`, `node_labels`, `kind`, `options` with
+  `local` and `go`, `valid`, `why`) and `settings.standing_valid`; every report's answer carries the node's
+  standing instruction (`NodeView::standing`), also at `GET /v1/nodes/{name}/standing` (`Client::standing`);
+  `NodeReport::local` lists jobs a node runs under it, counted as used until they end (`NodeView::local`,
+  `ResourceView::local`); the example configurations `config.build-fleet.example.toml` and
+  `config.hil-bench.example.toml` (SVC-3).
+- `choreograph top` shows each node's standing serial, when it runs out, and its local jobs (SVC-3).
+
+### Changed
+
+- **Breaking:** `NodeView` has the fields `standing` and `local`, `ResourceView` the field `local`,
+  `NodeReport` the field `local`, `config::Settings` the field `standing_valid` (struct literals need them)
+  (SVC-3).
 
 ## [0.4.0] - 2026-10-27
 

@@ -49,6 +49,8 @@ Cargo workspace, edition 2024, one shared version.
   - `lease.rs`: `Authority`, the one authority over a `Live`: every start a lease with a fencing token, a
     TTL and heartbeats, released with an outcome or expired; an append-only journal of every accepted change,
     replayed to rebuild the same state after a restart.
+  - `standing.rs`: standing instructions, what a node may do while it can't reach the service (`Standing`,
+    `Rule`, `Choice`), and the pure `decide` every node applies; `Standing::lone` for a node with no scheduler.
   - `plan.rs`: the `Planner` trait, `Plan` (starts, reservations, wait reasons), `WaitReason`, and `Fifo`, the
     first-fit baseline planner.
   - `list.rs`: `ListScheduler`, the main planner: effective priority (class, aging, deadline urgency), placement

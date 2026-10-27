@@ -47,7 +47,7 @@ use tower::ServiceExt;
 
 use crate::api::{
     ApiError, BeatView, Health, JobRef, JobView, NodeReport, NodeView, QueueView, Release,
-    SubmitGroup, SubmitJob, TellJob, UsageView, UseReport,
+    Standing, SubmitGroup, SubmitJob, TellJob, UsageView, UseReport,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -291,6 +291,16 @@ impl Client {
     pub async fn report(&self, node: &str, r: &NodeReport) -> Result<NodeView, ClientError> {
         self.call(Method::POST, &format!("/v1/nodes/{node}"), Some(r))
             .await
+    }
+
+    /// A node's current standing instruction: what it may do while it can't reach the service.
+    pub async fn standing(&self, node: &str) -> Result<Standing, ClientError> {
+        self.call(
+            Method::GET,
+            &format!("/v1/nodes/{node}/standing"),
+            None::<&()>,
+        )
+        .await
     }
 
     pub async fn queue(&self) -> Result<QueueView, ClientError> {

@@ -15,7 +15,8 @@
 //! | report what it used | `POST /v1/leases/{token}/usage` | [`UseReport`] | [`UsageView`] |
 //! | restart in place | `POST /v1/leases/{token}/restart` | | [`JobView`] |
 //! | tell a job's holder | `POST /v1/jobs/{id}/tell` | [`TellJob`] | [`JobView`] |
-//! | report a node | `POST /v1/nodes/{name}` | [`NodeReport`] | [`NodeView`] |
+//! | report a node | `POST /v1/nodes/{name}` | [`NodeReport`] | [`NodeView`] (with its [`Standing`]) |
+//! | a node's standing instruction | `GET /v1/nodes/{name}/standing` | | [`Standing`] |
 //! | the queue | `GET /v1/queue` | | [`QueueView`] |
 //! | is it up | `GET /v1/health` (no token) | | [`Health`] |
 //!
@@ -31,6 +32,11 @@ use choreograph::budget::{Budget, Meter, OnHard, Scope};
 use choreograph::model::{Labels, Preempt};
 use choreograph::{Crossing, Dur, Outcome, Time};
 use serde::{Deserialize, Deserializer, Serialize};
+
+pub use choreograph::standing::{Choice, LocalJob, Rule, Standing};
+
+/// The API's version: the paths' prefix, and what a [`Standing`] says it was made for.
+pub const API_VERSION: &str = "v1";
 
 /// The service's id of a job: never reused, stable for the job's whole life (the library's own ids are
 /// renumbered when finished jobs are compacted).
@@ -383,10 +389,18 @@ pub struct NodeReport {
     /// reported before and leaves out now has no room.
     #[serde(default)]
     pub room: BTreeMap<String, u64>,
+    /// The jobs it runs under its standing instruction, without a lease: counted as used on this node (taken
+    /// off its room) until a report leaves them out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local: Vec<LocalJob>,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// A node with its resources.
@@ -401,6 +415,13 @@ pub struct NodeView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported: Option<Time>,
     pub resources: Vec<ResourceView>,
+    /// The jobs it last reported running under its standing instruction.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local: Vec<LocalJob>,
+    /// Its current standing instruction: what it may do while it can't reach the service. Keep the one with
+    /// the highest serial, and count its validity from when it arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standing: Option<Standing>,
 }
 
 /// A resource and how much of it is used.
@@ -411,6 +432,9 @@ pub struct ResourceView {
     /// The capacity planned with (the measured one when there is one).
     pub capacity: u64,
     pub used: u64,
+    /// Held by jobs its node runs under its standing instruction, already taken off `capacity`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub local: u64,
     /// The jobs holding it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub holders: Vec<JobRef>,

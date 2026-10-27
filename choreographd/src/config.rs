@@ -35,6 +35,16 @@
 //!   { name = "wall", meter = "wall", soft = "8h", hard = "12h", on_hard = "stop" },
 //! ]
 //!
+//! [[standing]]         # what a node may do while it can't reach this service, see StandingConfig
+//! node_labels = { builds = "true" }  # or node = "node-a"; neither: every node
+//! kind = "build"                     # a job kind, "*" for any
+//! options = [
+//!   { local = { max = 2, share = { ram = 800 }, pressure = true } },
+//!   { go = { best = 2, rank_by = "ram" } },
+//! ]
+//! valid = "12h"
+//! why = "builds wait for the scheduler on this node"
+//!
 //! [policy]             # the list scheduler (choreograph::Policy); every key optional
 //! aging_per_class = "1h"
 //!
@@ -60,7 +70,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use choreograph::model::{Preempt, Unit};
+use std::collections::BTreeMap;
+
+use choreograph::model::{Labels, Preempt, Unit};
 use choreograph::{Dur, LeaseSettings, Policy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -94,6 +106,10 @@ pub struct Config {
     /// takes the defaults (bounded, never preempted, its run learned from earlier releases).
     #[serde(default, rename = "job_kind")]
     pub job_kinds: Vec<JobKindConfig>,
+    /// Standing instructions: what each node may do while it can't reach the service, handed out ahead of
+    /// time with every answer to its report.
+    #[serde(default, rename = "standing")]
+    pub standing: Vec<StandingConfig>,
     #[serde(default)]
     pub policy: Policy,
     #[serde(default)]
@@ -163,6 +179,104 @@ pub struct JobKindConfig {
     /// win). Default: none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub budgets: Vec<BudgetSpec>,
+}
+
+/// One standing instruction: for the nodes and job kind it selects, what a node may do while it can't reach
+/// the service. For each node and kind the most specific entry wins: one naming the node over one selecting
+/// by labels (more labels over fewer) over one for every node; at the same, one naming the kind over `"*"`;
+/// then the first in the file. A kind no entry names takes the most specific `"*"` entry, and without one it
+/// waits.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StandingConfig {
+    /// Only this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// Only nodes with these labels (labels or policy labels).
+    #[serde(default, skip_serializing_if = "Labels::is_empty")]
+    pub node_labels: Labels,
+    /// The job kind, `"*"` for any.
+    pub kind: String,
+    /// What the node may do, in order; when none fits, the job waits.
+    #[serde(default)]
+    pub options: Vec<OptionConfig>,
+    /// How long it holds from the moment the node receives it. Default: `settings.standing_valid`.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_dur")]
+    pub valid: Option<Dur>,
+    /// One line for people when a job waits under it.
+    #[serde(default)]
+    pub why: String,
+}
+
+/// One option of a standing instruction.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum OptionConfig {
+    /// Run on the node itself, within limits (see [`choreograph::standing::Local`]).
+    Local(LocalConfig),
+    /// Send the job to other nodes.
+    Go(GoConfig),
+}
+
+/// Run on the node itself, within limits.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalConfig {
+    /// At most this many such jobs at once (all kinds sharing `pool`). Default: no count, only the room.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<u32>,
+    /// Kinds whose local options name the same pool count together. Default: the kind's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
+    /// Per resource kind (`"*"` for every other), the part of the node's room the pool may hold, per mille.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub share: BTreeMap<String, u32>,
+    /// Hold back while the node is under pressure.
+    #[serde(default)]
+    pub pressure: bool,
+    /// Each such job runs at most this long.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_dur")]
+    pub max_run: Option<Dur>,
+    /// A lock the client takes before it runs the job (opaque to the service).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusive: Option<String>,
+}
+
+/// Send the job to other nodes: the named ones in order, then up to `best` more that the service picks when
+/// it hands the instruction out (up, not this node, with `node_labels`, any policy label tolerated, most free
+/// `rank_by` first). The list goes stale as the room changes: give such an entry a short `valid`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<String>,
+    #[serde(default)]
+    pub best: u32,
+    /// Labels a picked node must have (labels or policy labels).
+    #[serde(default, skip_serializing_if = "Labels::is_empty")]
+    pub node_labels: Labels,
+    /// Policy labels accepted on a picked node without asking for them.
+    #[serde(default, skip_serializing_if = "Labels::is_empty")]
+    pub tolerate: Labels,
+    /// The resource kind whose free room ranks the picks. Default: by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank_by: Option<String>,
+}
+
+impl StandingConfig {
+    /// Whether it selects a node with these labels and policy labels.
+    pub fn selects(&self, node: &str, labels: &Labels, policy: &Labels) -> bool {
+        self.node.as_ref().is_none_or(|n| n == node)
+            && self
+                .node_labels
+                .iter()
+                .all(|(k, v)| labels.get(k) == Some(v) || policy.get(k) == Some(v))
+    }
+
+    /// How specific its node selector is: a node over labels (more over fewer) over every node.
+    pub fn specificity(&self) -> (bool, usize) {
+        (self.node.is_some(), self.node_labels.len())
+    }
 }
 
 fn socket_mode() -> u32 {
@@ -274,6 +388,10 @@ pub struct Settings {
     /// A TLS handshake that takes longer is given up.
     #[serde(with = "dur")]
     pub handshake: Dur,
+    /// How long a standing instruction holds from the moment a node receives it, when its entry gives no
+    /// `valid`.
+    #[serde(with = "dur")]
+    pub standing_valid: Dur,
 }
 
 impl Default for Settings {
@@ -288,6 +406,7 @@ impl Default for Settings {
             shared_node: "shared".into(),
             max_body: 1 << 20,
             handshake: Dur::secs(10),
+            standing_valid: Dur::hours(12),
         }
     }
 }
@@ -391,6 +510,7 @@ impl Config {
                 ));
             }
         }
+        self.check_standing()?;
         for (i, c) in self.clients.iter().enumerate() {
             if self.clients[..i].iter().any(|o| o.name == c.name) {
                 return bad(format!("client {:?} is declared twice", c.name));
@@ -427,6 +547,7 @@ impl Config {
             ("tick", s.tick),
             ("keep_done", s.keep_done),
             ("handshake", s.handshake),
+            ("standing_valid", s.standing_valid),
         ] {
             if d <= Dur::ZERO {
                 return bad(format!("settings.{name} must be positive"));
@@ -440,6 +561,62 @@ impl Config {
         }
         if s.shared_node.is_empty() {
             return bad("settings.shared_node must not be empty".into());
+        }
+        Ok(())
+    }
+
+    fn check_standing(&self) -> Result<(), ConfigError> {
+        let bad = |m: String| Err(ConfigError::Invalid(m));
+        for (i, e) in self.standing.iter().enumerate() {
+            let at = format!("[[standing]] {} (kind {:?})", i + 1, e.kind);
+            if e.kind.is_empty() {
+                return bad(format!("{at}: kind is empty; \"*\" for any"));
+            }
+            if self.standing[..i]
+                .iter()
+                .any(|o| (&o.node, &o.node_labels, &o.kind) == (&e.node, &e.node_labels, &e.kind))
+            {
+                return bad(format!(
+                    "{at}: another entry selects the same nodes and kind"
+                ));
+            }
+            if e.node.as_ref().is_some_and(|n| n.is_empty()) {
+                return bad(format!("{at}: node is empty"));
+            }
+            if e.valid.is_some_and(|d| d <= Dur::ZERO) {
+                return bad(format!("{at}: valid must be positive"));
+            }
+            for o in &e.options {
+                match o {
+                    OptionConfig::Local(l) => {
+                        if let Some((k, pm)) = l.share.iter().find(|(_, pm)| **pm > 1000) {
+                            return bad(format!(
+                                "{at}: share of {k} is {pm}‰, at most 1000 (the whole room)"
+                            ));
+                        }
+                        if let Some(k) = l
+                            .share
+                            .keys()
+                            .find(|k| *k != "*" && self.kind(k).is_none_or(|c| c.shared))
+                        {
+                            return bad(format!("{at}: share names {k:?}, not a node's [[kind]]"));
+                        }
+                        if l.max_run.is_some_and(|d| d <= Dur::ZERO) {
+                            return bad(format!("{at}: max_run must be positive"));
+                        }
+                    }
+                    OptionConfig::Go(g) => {
+                        if g.nodes.is_empty() && g.best == 0 {
+                            return bad(format!("{at}: go names no nodes and picks none (best)"));
+                        }
+                        if let Some(k) = &g.rank_by
+                            && self.kind(k).is_none_or(|c| c.shared)
+                        {
+                            return bad(format!("{at}: rank_by {k:?} is not a node's [[kind]]"));
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -517,6 +694,23 @@ fn parse_hash(s: &str) -> Option<[u8; 32]> {
         *o = u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok()?;
     }
     Some(out)
+}
+
+/// An optional duration as text (`1h30m`) or milliseconds.
+pub(crate) mod opt_dur {
+    use choreograph::Dur;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(d: &Option<Dur>, s: S) -> Result<S::Ok, S::Error> {
+        match d {
+            Some(d) => super::dur::serialize(d, s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Dur>, D::Error> {
+        super::dur::deserialize(d).map(Some)
+    }
 }
 
 /// A file mode as octal text (`"0660"`).
@@ -632,6 +826,17 @@ mod tests {
         assert!(!c.tokens && c.tls.is_none());
         let c = Config::parse(include_str!("../deploy/config.tls.example.toml")).unwrap();
         assert!(c.tokens && c.tls.is_some() && c.clients.len() == 2);
+        let c = Config::parse(include_str!("../deploy/config.build-fleet.example.toml")).unwrap();
+        assert_eq!(c.standing.len(), 6);
+        assert_eq!(c.standing[5].valid, Some(Dur::hours(7 * 24)));
+        let c = Config::parse(include_str!("../deploy/config.hil-bench.example.toml")).unwrap();
+        let OptionConfig::Local(soak) = &c.standing[0].options[0] else {
+            panic!("{:?}", c.standing[0])
+        };
+        assert_eq!(
+            (soak.share["channels"], soak.max_run),
+            (500, Some(Dur::hours(4)))
+        );
     }
 
     #[test]
@@ -662,6 +867,32 @@ mod tests {
             ),
             ("[lease]\npair_bounces = \"lots\"", "a number or"),
             ("[settings]\ntick = \"soon\"", "not a duration"),
+            ("[[standing]]\nkind = \"\"", "kind is empty"),
+            (
+                "[[standing]]\nkind = \"b\"\n[[standing]]\nkind = \"b\"",
+                "same nodes and kind",
+            ),
+            (
+                "[[standing]]\nkind = \"b\"\noptions = [{ local = { share = { ram = 1001 } } }]",
+                "at most 1000",
+            ),
+            (
+                "[[standing]]\nkind = \"b\"\noptions = [{ local = { share = { disk = 10 } } }]",
+                "not a node's [[kind]]",
+            ),
+            (
+                "[[standing]]\nkind = \"b\"\noptions = [{ go = {} }]",
+                "picks none",
+            ),
+            (
+                "[[standing]]\nkind = \"b\"\noptions = [{ go = { best = 1, rank_by = \"main\" } }]",
+                "rank_by",
+            ),
+            (
+                "[[standing]]\nkind = \"b\"\noptions = [{ local = { mxa = 1 } }]",
+                "unknown field",
+            ),
+            ("[[standing]]\nkind = \"b\"\nvalid = \"0s\"", "positive"),
         ] {
             let e = Config::parse(&with_clients(&format!("{BASE}\n{extra}")))
                 .unwrap_err()
