@@ -709,7 +709,7 @@ mod tests {
             order.sort_by_key(|j| Reverse((model.job(*j).arrival, *j)));
             for j in order {
                 if let Some(a) = find_assignment(model, j, &free, &|_, _| 0) {
-                    for (need, r) in model.job(j).needs.iter().zip(&a.0) {
+                    for (need, r) in model.job(j).needs_for(&a).iter().zip(&a.resources) {
                         free[r.index()] -= need.amount;
                     }
                     plan.starts.push(Start {
@@ -988,7 +988,7 @@ mod tests {
                     .queued()
                     .map(|job| Start {
                         job,
-                        assignment: Assignment(vec![crate::model::ResourceId(0)]),
+                        assignment: Assignment::new(vec![crate::model::ResourceId(0)]),
                     })
                     .collect(),
                 ..Plan::default()

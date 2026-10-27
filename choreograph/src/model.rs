@@ -300,12 +300,57 @@ pub struct Job {
     /// hears when it crosses one (see [`budget`](crate::budget)). Set per job or by the caller per kind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub budgets: Vec<crate::budget::Budget>,
+    /// Smaller alternatives to `needs` for a moldable job (a soak test on 4 channels or on 2, a test run with
+    /// fewer threads), from larger to smaller: shape 0 is `needs`, shape `k` is `shapes[k - 1]`. The planner
+    /// grants the first shape that fits now, and the [`Assignment`](crate::Assignment) says which one it
+    /// got. Empty: the job has the one shape `needs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shapes: Vec<Vec<Need>>,
+    /// How long the job may wait in the queue before it starts anyway, on the resources it is pinned to,
+    /// over their capacity (a run that must not starve, a person's "start it now"). Counted from when it
+    /// could first start (its earliest start, and the end of the jobs it comes after). Only for a job outside
+    /// a group whose every need, in its smallest shape, names a node or a resource (see [`Job::pinned`]).
+    /// `None`: it waits for room.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_anyway_after: Option<Dur>,
 }
 
 impl Job {
     /// The earliest time the job may start: the later of its arrival and release time.
     pub fn earliest_start(&self) -> Time {
         self.release.map_or(self.arrival, |r| r.max(self.arrival))
+    }
+
+    /// How many shapes the job has: 1 plus its alternatives.
+    pub fn shape_count(&self) -> usize {
+        1 + self.shapes.len()
+    }
+
+    /// The needs of shape `k` (0 is `needs`), `None` past the last.
+    pub fn shape(&self, k: usize) -> Option<&[Need]> {
+        match k {
+            0 => Some(&self.needs),
+            k => self.shapes.get(k - 1).map(Vec::as_slice),
+        }
+    }
+
+    /// The needs an assignment of this job meets: those of its shape (empty for a shape the job lacks).
+    pub fn needs_for(&self, a: &crate::state::Assignment) -> &[Need] {
+        self.shape(a.shape).unwrap_or_default()
+    }
+
+    /// The index of the smallest shape, the last one.
+    pub fn smallest(&self) -> usize {
+        self.shapes.len()
+    }
+
+    /// Whether every need of shape `k` names a node or a resource, so it has one place to go.
+    pub fn pinned(&self, k: usize) -> bool {
+        self.shape(k).is_some_and(|needs| {
+            needs
+                .iter()
+                .all(|n| n.select.node.is_some() || n.select.resource.is_some())
+        })
     }
 }
 
@@ -638,6 +683,18 @@ pub enum ModelError {
     BadId { what: &'static str, id: u32 },
     #[error("job {job:?}: {problem}")]
     BadBudget { job: String, problem: String },
+    #[error(
+        "job {job:?}: need #{need} of shape {shape} can never be met: no resource matches its kind, selector, state and amount"
+    )]
+    NoMatchInShape {
+        job: String,
+        shape: usize,
+        need: usize,
+    },
+    #[error("job {job:?}: shape {shape} has no needs")]
+    EmptyShape { job: String, shape: usize },
+    #[error("job {job:?} cannot start anyway: {problem}")]
+    StartAnyway { job: String, problem: &'static str },
 }
 
 /// Builds a [`Model`] step by step; [`ModelBuilder::build`] validates it.
@@ -842,40 +899,33 @@ fn check_jobs(m: &Model, first: usize) -> Result<(), ModelError> {
                 });
             }
         }
-        for (ni, need) in j.needs.iter().enumerate() {
-            bad("kind", need.kind.0, m.kinds.len())?;
-            if let Some(r) = need.select.resource {
-                bad("resource", r.0, m.resources.len())?;
-            }
-            if let Some(n) = need.select.node {
-                bad("node", n.0, m.nodes.len())?;
-            }
-            if m.candidates(need).is_empty() {
-                return Err(ModelError::NoMatch {
-                    job: j.name.clone(),
-                    need: ni,
-                });
-            }
-        }
-        // Needs that share a same_node tag need a node with a candidate for each of them.
-        let mut tags: BTreeMap<&str, Vec<&Need>> = BTreeMap::new();
-        for need in &j.needs {
-            if let Some(t) = &need.same_node {
-                tags.entry(t).or_default().push(need);
-            }
-        }
-        for (tag, needs) in tags {
-            let ok = (0..m.nodes.len() as u32).map(NodeId).any(|n| {
-                needs
-                    .iter()
-                    .all(|need| m.candidates(need).iter().any(|r| m.resource(*r).node == n))
+        if j.start_anyway_after.is_some_and(|d| d < Dur::ZERO) {
+            return Err(ModelError::StartAnyway {
+                job: j.name.clone(),
+                problem: "a negative wait",
             });
-            if !ok {
-                return Err(ModelError::NoCommonNode {
+        }
+        if j.start_anyway_after.is_some() && j.group.is_some() {
+            return Err(ModelError::StartAnyway {
+                job: j.name.clone(),
+                problem: "a member of a group starts with its group",
+            });
+        }
+        for k in 0..j.shape_count() {
+            let shape = j.shape(k).unwrap_or_default();
+            if k > 0 && shape.is_empty() {
+                return Err(ModelError::EmptyShape {
                     job: j.name.clone(),
-                    tag: tag.to_string(),
+                    shape: k,
                 });
             }
+            check_needs(m, &j.name, k, shape)?;
+        }
+        if j.start_anyway_after.is_some() && !j.pinned(j.smallest()) {
+            return Err(ModelError::StartAnyway {
+                job: j.name.clone(),
+                problem: "not every need names a node or a resource",
+            });
         }
     }
     for g in &m.groups {
@@ -930,6 +980,55 @@ fn check_jobs(m: &Model, first: usize) -> Result<(), ModelError> {
     Ok(())
 }
 
+/// Checks the needs of shape `shape` of job `job`: ids in range, a candidate for each, a common node per
+/// same_node tag.
+fn check_needs(m: &Model, job: &str, shape: usize, needs: &[Need]) -> Result<(), ModelError> {
+    for (ni, need) in needs.iter().enumerate() {
+        bad("kind", need.kind.0, m.kinds.len())?;
+        if let Some(r) = need.select.resource {
+            bad("resource", r.0, m.resources.len())?;
+        }
+        if let Some(n) = need.select.node {
+            bad("node", n.0, m.nodes.len())?;
+        }
+        if m.candidates(need).is_empty() {
+            return Err(if shape == 0 {
+                ModelError::NoMatch {
+                    job: job.to_string(),
+                    need: ni,
+                }
+            } else {
+                ModelError::NoMatchInShape {
+                    job: job.to_string(),
+                    shape,
+                    need: ni,
+                }
+            });
+        }
+    }
+    // Needs that share a same_node tag need a node with a candidate for each of them.
+    let mut tags: BTreeMap<&str, Vec<&Need>> = BTreeMap::new();
+    for need in needs {
+        if let Some(t) = &need.same_node {
+            tags.entry(t).or_default().push(need);
+        }
+    }
+    for (tag, needs) in tags {
+        let ok = (0..m.nodes.len() as u32).map(NodeId).any(|n| {
+            needs
+                .iter()
+                .all(|need| m.candidates(need).iter().any(|r| m.resource(*r).node == n))
+        });
+        if !ok {
+            return Err(ModelError::NoCommonNode {
+                job: job.to_string(),
+                tag: tag.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// A job with defaults, for builders and tests: no needs, zero durations, class 0, weight 1, arrival at 0.
 impl Job {
     pub fn new(name: impl Into<String>) -> Job {
@@ -951,6 +1050,8 @@ impl Job {
             open: false,
             pause_keeps: Vec::new(),
             budgets: Vec::new(),
+            shapes: Vec::new(),
+            start_anyway_after: None,
         }
     }
 

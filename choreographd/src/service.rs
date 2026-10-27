@@ -1175,7 +1175,7 @@ impl Service {
                     granted: l.granted,
                     expires: l.expires,
                     held: assignment
-                        .0
+                        .resources
                         .iter()
                         .zip(&model.job(j).needs)
                         .enumerate()

@@ -213,6 +213,9 @@ struct JobT {
     pause_keeps: Vec<String>,
     #[serde(default)]
     budgets: Vec<crate::budget::Budget>,
+    #[serde(default)]
+    shapes: Vec<Vec<NeedT>>,
+    start_anyway_after: Option<String>,
 }
 
 /// Parses a job set from TOML text into a validated [`Model`].
@@ -300,8 +303,7 @@ pub fn from_toml(text: &str) -> Result<Model, JobSetError> {
     let mut groups: BTreeMap<String, Vec<JobId>> = BTreeMap::new();
     for (i, j) in f.job.into_iter().enumerate() {
         let ctx = format!("job {:?}", j.name);
-        let mut needs = Vec::new();
-        for n in j.needs {
+        let need_of = |n: NeedT| -> Result<Need, JobSetError> {
             let (kind, unit) = *kinds
                 .get(&n.kind)
                 .ok_or_else(|| unknown(&ctx, "kind", &n.kind))?;
@@ -325,7 +327,7 @@ pub fn from_toml(text: &str) -> Result<Model, JobSetError> {
                         .ok_or_else(|| unknown(&ctx, "node", x))
                 })
                 .transpose()?;
-            needs.push(Need {
+            Ok(Need {
                 kind,
                 amount: match &n.amount {
                     Some(a) => amount(a, unit, &ctx)?,
@@ -340,8 +342,18 @@ pub fn from_toml(text: &str) -> Result<Model, JobSetError> {
                 },
                 state: n.state,
                 same_node: n.same_node,
-            });
-        }
+            })
+        };
+        let needs = j
+            .needs
+            .into_iter()
+            .map(need_of)
+            .collect::<Result<Vec<_>, _>>()?;
+        let shapes = j
+            .shapes
+            .into_iter()
+            .map(|sh| sh.into_iter().map(need_of).collect::<Result<Vec<_>, _>>())
+            .collect::<Result<Vec<_>, _>>()?;
         let est = |e: &Option<EstimateT>| -> Result<Estimate, JobSetError> {
             Ok(match e {
                 None => Estimate::default(),
@@ -402,6 +414,12 @@ pub fn from_toml(text: &str) -> Result<Model, JobSetError> {
             open: j.open,
             pause_keeps,
             budgets: j.budgets.clone(),
+            shapes,
+            start_anyway_after: j
+                .start_anyway_after
+                .as_deref()
+                .map(|d| dur(d, &ctx))
+                .transpose()?,
         });
     }
     for (name, members) in groups {

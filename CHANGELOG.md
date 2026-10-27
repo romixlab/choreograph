@@ -5,6 +5,22 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Added
+
+- Moldable jobs: `Job::shapes`, smaller alternatives to `Job::needs` from larger to smaller; the planners grant
+  the largest shape that fits now, and reservations, backfilling, pauses and the forecast count the shape a job
+  got (`Job::shape`, `shape_count`, `smallest`, `needs_for`, `plan::find_shaped`); the job-set key `shapes`;
+  the example `examples/hil_moldable.toml` (CORE-8).
+- Start anyway: `Job::start_anyway_after`, a job pinned to a node or resource starts past this wait, counted
+  over capacity (`State::ready_since`, `start_anyway_at`, `may_start_anyway`, `JobStatus::Running::over`,
+  `plan::anyway_assignment`, `plan::wake_for_start_anyway`); the job-set key `start_anyway_after`; model errors
+  `NoMatchInShape`, `EmptyShape`, `StartAnyway`; state error `NoShape` (CORE-8).
+
+### Changed
+
+- **Breaking:** `Assignment` is a struct with `resources` (the former `.0`) and `shape`; `Assignment::new`
+  builds one of shape 0. Shape 0 still serializes as a bare list, so traces and journals read as before (CORE-8).
+
 ## [0.5.0] - 2026-10-27
 
 ### Added

@@ -482,7 +482,7 @@ mod tests {
 
     fn on(live: &Live, j: JobId) -> Vec<ResourceId> {
         match live.state().status(j) {
-            JobStatus::Running { assignment, .. } => assignment.0.clone(),
+            JobStatus::Running { assignment, .. } => assignment.resources.clone(),
             s => panic!("not running: {s:?}"),
         }
     }
@@ -599,7 +599,7 @@ mod tests {
         assert_eq!(live.state().used(ra), 10);
         // The state refuses a start a planner should not have made.
         assert!(matches!(
-            live.start(&[(b, Assignment(vec![ra]))]),
+            live.start(&[(b, Assignment::new(vec![ra]))]),
             Err(StateError::OverCapacity { free: 0, .. })
         ));
         // FirstFit sees the same free amounts.

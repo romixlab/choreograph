@@ -43,6 +43,18 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   job's wait answers once it has its resources back, `give_way` on the lease and the heartbeat; `choreograph
   top` shows paused jobs, what they gave back and who is asked to give way. Tests:
   `choreograph/tests/open_ended.rs`, `choreographd/tests/e2e.rs` (`an_open_session_...`).
+- 🚧 **CORE-8 start-anyway-and-moldable**: start-anyway: `Job::start_anyway_after`, how long a job pinned to
+  a node or resource (every need of its smallest shape names one; outside a group) may wait before it starts
+  anyway, counted from when it could first start (`State::ready_since`, `start_anyway_at`,
+  `may_start_anyway`); `State` lets such a start go over capacity and marks it (`JobStatus::Running::over`),
+  both planners start it on its smallest shape where it is pinned (`plan::anyway_assignment`) and ask to be
+  woken at its time, and the list scheduler's profile counts what it holds. Moldable needs: `Job::shapes`,
+  smaller alternatives to `needs` from larger to smaller; an `Assignment` names its shape (serialized as before
+  for shape 0), `find_assignment` and the list scheduler grant the largest shape that fits now (for its whole
+  estimated duration next to the reservations), and reservations, backfilling, pauses and the forecast count
+  the shape a job got; a wait reason is that of the smallest shape. Job-set keys `shapes` and
+  `start_anyway_after`; the example `examples/hil_moldable.toml`. Tests:
+  `choreograph/tests/start_anyway_moldable.rs`. Planned: choreographd's per-kind settings, the API and `top`.
 - 📋 **EST-3 learned-needs**: needs learned per job kind from the peaks holders report (an open-ended session's
   RAM), as its run length is learned today (CORE-6).
 - 🚧 **EXEC-1 executor-state-machine**: done: leases (`lease.rs`): `Authority` owns a `Live` and grants every

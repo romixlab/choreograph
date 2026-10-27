@@ -501,7 +501,7 @@ impl Collector {
                     .map(|j| {
                         j.needs
                             .iter()
-                            .zip(&assignment.0)
+                            .zip(&assignment.resources)
                             .map(|(n, r)| (*r, n.amount))
                             .collect()
                     })
@@ -1049,7 +1049,7 @@ mod tests {
         b.job(Job::new("c").needs(k, 1));
         let m = b.build().unwrap();
         let (ja, jb, jc) = (JobId(0), JobId(1), JobId(2));
-        let slot = Assignment(vec![ResourceId(0)]);
+        let slot = Assignment::new(vec![ResourceId(0)]);
         let mut tr = Trace::new("hand");
         let phase = |job, phase| Event::Phase { job, phase };
         ev(&mut tr, 0, Event::Arrived { job: ja });
@@ -1221,7 +1221,7 @@ mod tests {
             0,
             Event::Started {
                 job: x,
-                assignment: Assignment(vec![r0]),
+                assignment: Assignment::new(vec![r0]),
             },
         );
         ev(
@@ -1246,7 +1246,7 @@ mod tests {
             15,
             Event::Started {
                 job: x,
-                assignment: Assignment(vec![r1]),
+                assignment: Assignment::new(vec![r1]),
             },
         );
         ev(

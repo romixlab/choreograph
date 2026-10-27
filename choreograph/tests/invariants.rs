@@ -316,13 +316,13 @@ impl Replay {
                 let name = &self.names[s];
                 prop_assert!(!self.running.contains_key(&s), "{name} started twice");
                 prop_assert_eq!(
-                    assignment.0.len(),
+                    assignment.resources.len(),
                     self.needs[s].len(),
                     "{}: one resource per need",
                     name
                 );
                 let held: Vec<(ResourceId, u64)> = assignment
-                    .0
+                    .resources
                     .iter()
                     .copied()
                     .zip(self.needs[s].iter().copied())

@@ -70,8 +70,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{Estimate, JobId, Model, Need, NodeId, Phase, Preempt, ResourceId};
 use crate::plan::{
-    Plan, Planner, Reservation, Start, WaitReason, capacity_reason, find_assignment,
-    precondition_reason, resume_needs, resume_reason,
+    Plan, Planner, Reservation, Start, WaitReason, anyway_assignment, capacity_reason, find_shaped,
+    precondition_reason, resume_needs, resume_reason, wake_for_start_anyway,
 };
 use crate::policy::{Backfill, Placement, Policy, Quantile};
 use crate::state::{Assignment, JobStatus, State};
@@ -402,7 +402,7 @@ impl ListScheduler {
                 ..
             } = &mut why
             {
-                let amount = model.job(j).needs[*need].amount;
+                let amount = model.job(j).needs_for(assignment)[*need].amount;
                 *free_at = busy.earliest_free(*resource, amount, now);
             }
             plan.waits.insert(j, why);
@@ -477,7 +477,12 @@ impl ListScheduler {
                     continue;
                 };
                 let end = end.max(now + Dur(1));
-                for (need, r) in model.job(v).needs.iter().zip(&assignment.0) {
+                for (need, r) in model
+                    .job(v)
+                    .needs_for(assignment)
+                    .iter()
+                    .zip(&assignment.resources)
+                {
                     p.free_early(*r, end, need.amount);
                 }
                 asked.push(v);
@@ -491,10 +496,16 @@ impl ListScheduler {
         }
     }
 
-    /// The best assignment for job `j` with these free amounts, or `None`.
+    /// The best assignment for job `j` with these free amounts in the first of its shapes that fits (the
+    /// largest), or `None`.
     fn choose(&self, model: &Model, j: JobId, free: &[u64]) -> Option<Assignment> {
-        let job = model.job(j);
-        let fit = |i: usize, r: ResourceId| self.need_score(model, &job.needs[i], r, free);
+        (0..model.job(j).shape_count()).find_map(|k| self.choose_shaped(model, j, k, free))
+    }
+
+    /// The best assignment for job `j` in shape `k` with these free amounts, or `None`.
+    fn choose_shaped(&self, model: &Model, j: JobId, k: usize, free: &[u64]) -> Option<Assignment> {
+        let needs = model.job(j).shape(k)?;
+        let fit = |i: usize, r: ResourceId| self.need_score(model, &needs[i], r, free);
         let mut found: Vec<Assignment> = Vec::new();
         let mut add = |a: Option<Assignment>| {
             if let Some(a) = a
@@ -503,10 +514,9 @@ impl ListScheduler {
                 found.push(a);
             }
         };
-        add(find_assignment(model, j, free, &fit));
+        add(find_shaped(model, j, k, free, &fit));
         if self.policy.locality {
-            let nodes: BTreeSet<NodeId> = job
-                .needs
+            let nodes: BTreeSet<NodeId> = needs
                 .iter()
                 .flat_map(|n| model.candidates(n))
                 .map(|r| model.resource(r).node)
@@ -516,19 +526,24 @@ impl ListScheduler {
                     let away = i64::from(model.resource(r).node != n);
                     away * (1 << 40) + fit(i, r)
                 };
-                add(find_assignment(model, j, free, &rank));
+                add(find_shaped(model, j, k, free, &rank));
             }
         }
         found.into_iter().min_by_key(|a| {
             let spans = if self.policy.locality {
-                a.0.iter()
+                a.resources
+                    .iter()
                     .map(|r| model.resource(*r).node)
                     .collect::<BTreeSet<_>>()
                     .len()
             } else {
                 0
             };
-            (spans, self.assignment_score(model, j, a, free), a.0.clone())
+            (
+                spans,
+                self.assignment_score(model, j, a, free),
+                a.resources.clone(),
+            )
         })
     }
 
@@ -544,13 +559,13 @@ impl ListScheduler {
 
     /// The score of a whole assignment: the need score on the job's dominant resource (its largest share).
     fn assignment_score(&self, model: &Model, j: JobId, a: &Assignment, free: &[u64]) -> i64 {
-        let needs = &model.job(j).needs;
+        let needs = model.job(j).needs_for(a);
         let share = |(n, r): &(&Need, &ResourceId)| {
             u128::from(n.amount) * 1_000_000 / u128::from(model.resource(**r).capacity.max(1))
         };
         needs
             .iter()
-            .zip(&a.0)
+            .zip(&a.resources)
             .enumerate()
             .max_by_key(|(i, nr)| (share(nr), std::cmp::Reverse(*i)))
             .map_or(0, |(_, (n, r))| self.need_score(model, n, *r, free))
@@ -636,7 +651,7 @@ impl ListScheduler {
         for &m in members {
             match self.choose(model, m, &free) {
                 Some(a) => {
-                    for (need, r) in model.job(m).needs.iter().zip(&a.0) {
+                    for (need, r) in model.job(m).needs_for(&a).iter().zip(&a.resources) {
                         free[r.index()] -= need.amount;
                     }
                 }
@@ -649,7 +664,8 @@ impl ListScheduler {
                         ..
                     } = &mut why
                     {
-                        let amount = model.job(m).needs[*need].amount;
+                        let job = model.job(m);
+                        let amount = job.shape(job.smallest()).unwrap_or_default()[*need].amount;
                         *free_at = busy.earliest_free(*resource, amount, now);
                     }
                     return (m, why);
@@ -680,7 +696,12 @@ impl Planner for ListScheduler {
             {
                 // Still running at `now`, so it frees at the earliest just after.
                 let end = end.max(now + Dur(1));
-                for (need, r) in model.job(j).needs.iter().zip(&assignment.0) {
+                for (need, r) in model
+                    .job(j)
+                    .needs_for(assignment)
+                    .iter()
+                    .zip(&assignment.resources)
+                {
                     busy.release_at(*r, end, need.amount);
                 }
             }
@@ -724,6 +745,19 @@ impl Planner for ListScheduler {
                 }
                 continue;
             }
+            if let [m] = members[..]
+                && let Some(a) = anyway_assignment(model, state, m)
+            {
+                // Past its wait: it starts over capacity, and the profile counts what it holds.
+                let d = hold_dur(model, m, q);
+                busy.hold(model, m, &a, now, now + d);
+                full.hold(model, m, &a, now, now + d);
+                plan.starts.push(Start {
+                    job: m,
+                    assignment: a,
+                });
+                continue;
+            }
             let (who, why) = match self.place(model, &busy, &members, now) {
                 Some(_) => (
                     j,
@@ -757,6 +791,7 @@ impl Planner for ListScheduler {
             }
         }
         self.ask_give_way(model, state, &busy, &mut plan);
+        wake_for_start_anyway(model, state, &mut plan);
         plan
     }
 }
@@ -815,7 +850,7 @@ impl Profile {
 
     /// Job `j` holds its assignment over [from, until).
     fn hold(&mut self, model: &Model, j: JobId, a: &Assignment, from: Time, until: Time) {
-        for (need, r) in model.job(j).needs.iter().zip(&a.0) {
+        for (need, r) in model.job(j).needs_for(a).iter().zip(&a.resources) {
             let d = &mut self.deltas[r.index()];
             *d.entry(from).or_default() -= need.amount as i64;
             *d.entry(until).or_default() += need.amount as i64;
@@ -1089,7 +1124,7 @@ mod tests {
         let m = b.build().unwrap();
         let mut s = queued(&m, Time::ZERO, &[running]);
         let r = m.resource_by_name("slots").unwrap();
-        s.start(&m, &[(running, Assignment(vec![r]))]).unwrap();
+        s.start(&m, &[(running, Assignment::new(vec![r]))]).unwrap();
         s.advance(&m, running).unwrap(); // setup (0s) done, now in run
         for j in [head, short, long2, long3] {
             s.arrive(j).unwrap();
@@ -1159,7 +1194,7 @@ mod tests {
         let jd = b.job(Job::new("d").needs(k, 4).run(fixed(Dur::mins(25))));
         let m = b.build().unwrap();
         let mut s = queued(&m, Time::ZERO, &[running]);
-        s.start(&m, &[(running, Assignment(vec![r]))]).unwrap();
+        s.start(&m, &[(running, Assignment::new(vec![r]))]).unwrap();
         for j in [jb, jc, jd] {
             s.arrive(j).unwrap();
         }
@@ -1201,7 +1236,7 @@ mod tests {
         b.group("xy", vec![x, y]);
         let m = b.build().unwrap();
         let mut s = queued(&m, Time::ZERO, &[holder]);
-        s.start(&m, &[(holder, Assignment(vec![r]))]).unwrap();
+        s.start(&m, &[(holder, Assignment::new(vec![r]))]).unwrap();
         for j in [x, y, z] {
             s.arrive(j).unwrap();
         }
@@ -1242,7 +1277,7 @@ mod tests {
         let jp = b.job(Job::new("jp").needs(ram, 12).needs(probe, 1));
         let m = b.build().unwrap();
         let free = vec![16, 32, 1];
-        let pick = |policy: Policy, job| with(policy).choose(&m, job, &free).unwrap().0;
+        let pick = |policy: Policy, job| with(policy).choose(&m, job, &free).unwrap().resources;
         assert_eq!(
             pick(Policy::default(), j),
             vec![a_ram],

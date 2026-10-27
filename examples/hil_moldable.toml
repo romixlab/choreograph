@@ -1,0 +1,37 @@
+# A HIL bench with a four-channel logger. The soak test is moldable: it runs on all four channels when they are
+# free, else on two (`shapes`, larger first), and the planner grants the largest that fits when it starts. The
+# smoke test holds two channels when the soak arrives, so the soak starts at once on the other two instead of
+# waiting for all four. The nightly calibration is pinned to the bench and must not starve: after 30 minutes in
+# the queue it starts anyway (`start_anyway_after`), counted over the logger's capacity.
+
+[[node]]
+name = "bench"
+
+[[kind]]
+name = "channel"
+
+[[resource]]
+name = "logger"
+kind = "channel"
+node = "bench"
+capacity = 4
+
+[[job]]
+name = "smoke"
+needs = [{ kind = "channel", amount = 2 }]
+run = "20m"
+
+[[job]]
+name = "soak"
+kind = "soak"
+needs = [{ kind = "channel", amount = 4 }]
+shapes = [[{ kind = "channel", amount = 2 }]]
+run = { p50 = "4h", p90 = "6h" }
+arrival = "1m"
+
+[[job]]
+name = "calibration"
+needs = [{ kind = "channel", amount = 1, node = "bench" }]
+start_anyway_after = "30m"
+run = "10m"
+arrival = "2m"

@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{JobId, KindId, Model, NodeId, ResourceId};
+use crate::model::{JobId, KindId, Model, Need, NodeId, ResourceId};
 use crate::state::{Assignment, JobStatus, State};
 use crate::time::Time;
 
@@ -104,19 +104,30 @@ pub trait Planner {
     fn plan(&mut self, model: &Model, state: &State) -> Plan;
 }
 
-/// Finds an assignment for job `j` given free amounts per resource: each need gets one matching resource with
-/// enough free, needs sharing a `same_node` tag land on one node, and two needs on the same resource add up.
-/// Candidates are tried in the order `rank` returns them (lower first, ties by resource id); `None` when nothing
-/// fits. Exhaustive over candidates (backtracking), so a job with few needs is cheap and the answer is exact.
+/// Finds an assignment for job `j` given free amounts per resource, in the first of its shapes that fits (they
+/// go from larger to smaller, so the largest that fits): each need gets one matching resource with enough free,
+/// needs sharing a `same_node` tag land on one node, and two needs on the same resource add up. Candidates are
+/// tried in the order `rank` returns them (lower first, ties by resource id); `None` when no shape fits.
+/// Exhaustive over candidates (backtracking), so a job with few needs is cheap and the answer is exact.
 pub fn find_assignment(
     model: &Model,
     j: JobId,
     free: &[u64],
     rank: &dyn Fn(usize, ResourceId) -> i64,
 ) -> Option<Assignment> {
-    let job = model.job(j);
-    let cands: Vec<Vec<ResourceId>> = job
-        .needs
+    (0..model.job(j).shape_count()).find_map(|k| find_shaped(model, j, k, free, rank))
+}
+
+/// [`find_assignment`] in shape `k` only.
+pub fn find_shaped(
+    model: &Model,
+    j: JobId,
+    k: usize,
+    free: &[u64],
+    rank: &dyn Fn(usize, ResourceId) -> i64,
+) -> Option<Assignment> {
+    let needs = model.job(j).shape(k)?;
+    let cands: Vec<Vec<ResourceId>> = needs
         .iter()
         .enumerate()
         .map(|(i, n)| {
@@ -130,25 +141,60 @@ pub fn find_assignment(
         })
         .collect();
     let mut free = free.to_vec();
-    let mut chosen = Vec::with_capacity(job.needs.len());
+    let mut chosen = Vec::with_capacity(needs.len());
     let mut tags: BTreeMap<&str, NodeId> = BTreeMap::new();
-    if search(model, j, 0, &cands, &mut free, &mut chosen, &mut tags) {
-        Some(Assignment(chosen))
+    if search(model, needs, 0, &cands, &mut free, &mut chosen, &mut tags) {
+        Some(Assignment::shaped(k, chosen))
     } else {
         None
     }
 }
 
+/// Asks to be woken when a waiting job may start anyway (see [`State::start_anyway_at`]).
+pub fn wake_for_start_anyway(model: &Model, state: &State, plan: &mut Plan) {
+    let now = state.now();
+    for j in plan.waits.keys() {
+        if let Some(t) = state.start_anyway_at(model, *j).filter(|t| *t > now)
+            && matches!(state.status(*j), JobStatus::Queued)
+        {
+            plan.wake_at = Some(plan.wake_at.map_or(t, |w| w.min(t)));
+        }
+    }
+}
+
+/// Where a queued job that may start anyway ([`State::may_start_anyway`]) goes: its smallest shape, the least
+/// over capacity, on the resources it is pinned to, as if they were empty (a node that is down takes nothing).
+/// `None` for any other job, or when even that does not fit.
+pub fn anyway_assignment(model: &Model, state: &State, j: JobId) -> Option<Assignment> {
+    let job = model.job(j);
+    if !state.may_start_anyway(model, j) || job.group.is_some() || !job.pinned(job.smallest()) {
+        return None;
+    }
+    let empty: Vec<u64> = model
+        .resource_ids()
+        .map(|r| {
+            let res = model.resource(r);
+            if state.node_up(res.node) {
+                res.capacity
+            } else {
+                0
+            }
+        })
+        .collect();
+    find_shaped(model, j, job.smallest(), &empty, &|_, r| {
+        -(state.free(model, r) as i64)
+    })
+}
+
 fn search<'m>(
-    model: &'m Model,
-    j: JobId,
+    model: &Model,
+    needs: &'m [Need],
     i: usize,
     cands: &[Vec<ResourceId>],
     free: &mut [u64],
     chosen: &mut Vec<ResourceId>,
     tags: &mut BTreeMap<&'m str, NodeId>,
 ) -> bool {
-    let needs = &model.job(j).needs;
     if i == needs.len() {
         return true;
     }
@@ -172,7 +218,7 @@ fn search<'m>(
         }
         free[r.index()] -= need.amount;
         chosen.push(r);
-        if search(model, j, i + 1, cands, free, chosen, tags) {
+        if search(model, needs, i + 1, cands, free, chosen, tags) {
             return true;
         }
         chosen.pop();
@@ -184,10 +230,12 @@ fn search<'m>(
     false
 }
 
-/// Why job `j` (queued, past its release, dependencies done) does not fit with these free amounts.
+/// Why job `j` (queued, past its release, dependencies done) does not fit with these free amounts: the reason
+/// its smallest shape does not fit (a `need` index is into that shape, `Job::needs` when it has one).
 pub fn capacity_reason(model: &Model, state: &State, j: JobId, free: &[u64]) -> WaitReason {
     let job = model.job(j);
-    for (i, need) in job.needs.iter().enumerate() {
+    let needs = job.shape(job.smallest()).unwrap_or_default();
+    for (i, need) in needs.iter().enumerate() {
         let cands = model.candidates(need);
         if cands.is_empty() {
             return WaitReason::NoMatch { need: i };
@@ -221,8 +269,7 @@ pub fn capacity_reason(model: &Model, state: &State, j: JobId, free: &[u64]) -> 
         };
     }
     // Every need fits on its own: the same_node tags are what fails.
-    let tag = job
-        .needs
+    let tag = needs
         .iter()
         .find_map(|n| n.same_node.clone())
         .unwrap_or_default();
@@ -245,9 +292,9 @@ pub fn resume_needs(model: &Model, state: &State, j: JobId) -> Vec<(usize, Resou
     }
     model
         .job(j)
-        .needs
+        .needs_for(assignment)
         .iter()
-        .zip(&assignment.0)
+        .zip(&assignment.resources)
         .zip(&p.held)
         .enumerate()
         .filter(|(_, (_, h))| !**h)
@@ -358,7 +405,7 @@ impl Planner for FirstFit {
                 }
                 match find_assignment(model, m, &tentative, &|_, _| 0) {
                     Some(a) => {
-                        for (need, r) in model.job(m).needs.iter().zip(&a.0) {
+                        for (need, r) in model.job(m).needs_for(&a).iter().zip(&a.resources) {
                             tentative[r.index()] -= need.amount;
                         }
                         starts.push(Start {
@@ -366,10 +413,22 @@ impl Planner for FirstFit {
                             assignment: a,
                         });
                     }
-                    None => {
-                        blocked = Some((m, capacity_reason(model, state, m, &tentative)));
-                        break;
-                    }
+                    None => match anyway_assignment(model, state, m) {
+                        Some(a) => {
+                            for (need, r) in model.job(m).needs_for(&a).iter().zip(&a.resources) {
+                                let f = &mut tentative[r.index()];
+                                *f = f.saturating_sub(need.amount);
+                            }
+                            starts.push(Start {
+                                job: m,
+                                assignment: a,
+                            });
+                        }
+                        None => {
+                            blocked = Some((m, capacity_reason(model, state, m, &tentative)));
+                            break;
+                        }
+                    },
                 }
             }
             match blocked {
@@ -390,6 +449,7 @@ impl Planner for FirstFit {
             }
             decided.extend(members);
         }
+        wake_for_start_anyway(model, state, &mut plan);
         plan
     }
 }
@@ -445,7 +505,7 @@ mod tests {
         let free = vec![10, 10, 1];
         let a = find_assignment(&m, j, &free, &|_, _| 0).unwrap();
         assert_eq!(
-            a.0,
+            a.resources,
             vec![r2, p2],
             "n1's RAM is tried first, then backtracked"
         );

@@ -486,7 +486,7 @@ impl Authority {
             JobStatus::Running {
                 assignment, paused, ..
             } => assignment
-                .0
+                .resources
                 .iter()
                 .enumerate()
                 .any(|(i, x)| *x == r && paused.as_ref().is_none_or(|p| p.held[i])),
@@ -532,7 +532,7 @@ impl Authority {
             }
             let token = self.next;
             self.next = Token(token.0 + 1);
-            for r in &a.0 {
+            for r in &a.resources {
                 self.fence[r.index()] = Some(token);
             }
             let l = Lease {
@@ -1366,7 +1366,7 @@ mod tests {
         // A refused grant (b waits for a) changes nothing.
         let r0 = auth.live().model().resource_ids().next().unwrap();
         assert!(matches!(
-            auth.grant(&[(b, Assignment(vec![r0]))]),
+            auth.grant(&[(b, Assignment::new(vec![r0]))]),
             Err(LeaseError::State(StateError::DepNotDone { .. }))
         ));
         assert_eq!(auth.leases().len(), 2);

@@ -16,10 +16,64 @@ use serde::{Deserialize, Serialize};
 use crate::model::{JobId, Model, Need, NodeId, Phase, Remap, ResourceId};
 use crate::time::Time;
 
-/// Which resource satisfies each of a job's needs, in the order of `Job::needs`.
+/// How a job's demand is met: which of its shapes (see [`Job::shapes`](crate::model::Job::shapes); 0 is
+/// `Job::needs`, the largest) and which resource satisfies each need of that shape, in order.
+///
+/// It serializes as a bare list of resource ids for shape 0, so traces and journals written before shapes
+/// existed read the same.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Assignment(pub Vec<ResourceId>);
+#[serde(from = "AssignmentRepr", into = "AssignmentRepr")]
+pub struct Assignment {
+    pub resources: Vec<ResourceId>,
+    pub shape: usize,
+}
+
+impl Assignment {
+    /// An assignment of the job's first shape (`Job::needs`).
+    pub fn new(resources: Vec<ResourceId>) -> Assignment {
+        Assignment {
+            resources,
+            shape: 0,
+        }
+    }
+
+    /// An assignment of shape `shape`.
+    pub fn shaped(shape: usize, resources: Vec<ResourceId>) -> Assignment {
+        Assignment { resources, shape }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum AssignmentRepr {
+    Plain(Vec<ResourceId>),
+    Shaped {
+        shape: usize,
+        resources: Vec<ResourceId>,
+    },
+}
+
+impl From<AssignmentRepr> for Assignment {
+    fn from(r: AssignmentRepr) -> Assignment {
+        match r {
+            AssignmentRepr::Plain(resources) => Assignment::new(resources),
+            AssignmentRepr::Shaped { shape, resources } => Assignment { resources, shape },
+        }
+    }
+}
+
+impl From<Assignment> for AssignmentRepr {
+    fn from(a: Assignment) -> AssignmentRepr {
+        if a.shape == 0 {
+            AssignmentRepr::Plain(a.resources)
+        } else {
+            AssignmentRepr::Shaped {
+                shape: a.shape,
+                resources: a.resources,
+            }
+        }
+    }
+}
 
 /// How a job ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -66,6 +120,10 @@ pub enum JobStatus {
         /// Set while the job is paused: it gave back what it does not keep.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         paused: Option<Paused>,
+        /// It started anyway, past its [`Job::start_anyway_after`](crate::model::Job::start_anyway_after),
+        /// counted over the capacity of what it holds.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        over: bool,
     },
     Done {
         at: Time,
@@ -130,6 +188,8 @@ pub enum StateError {
     InCleanup(JobId),
     #[error("job {0:?} resumes only on the resources it ran on")]
     ResumeElsewhere(JobId),
+    #[error("job {job:?} has no shape {shape}")]
+    NoShape { job: JobId, shape: usize },
 }
 
 /// The runtime state of a model.
@@ -324,9 +384,10 @@ impl State {
             .iter()
             .copied()
             .filter(|j| match &self.status[j.index()] {
-                JobStatus::Running { assignment, .. } => {
-                    assignment.0.iter().any(|r| model.resource(*r).node == n)
-                }
+                JobStatus::Running { assignment, .. } => assignment
+                    .resources
+                    .iter()
+                    .any(|r| model.resource(*r).node == n),
                 _ => false,
             })
             .collect();
@@ -453,16 +514,22 @@ impl State {
                 return Err(StateError::DepNotDone { job: j, dep: *d });
             }
         }
-        if a.0.len() != job.needs.len() {
+        let Some(needs) = job.shape(a.shape) else {
+            return Err(StateError::NoShape {
+                job: j,
+                shape: a.shape,
+            });
+        };
+        if a.resources.len() != needs.len() {
             return Err(StateError::Arity {
                 job: j,
-                got: a.0.len(),
-                want: job.needs.len(),
+                got: a.resources.len(),
+                want: needs.len(),
             });
         }
         let mut take: BTreeMap<ResourceId, u64> = BTreeMap::new();
         let mut tags: BTreeMap<&str, NodeId> = BTreeMap::new();
-        for (i, (need, r)) in job.needs.iter().zip(&a.0).enumerate() {
+        for (i, (need, r)) in needs.iter().zip(&a.resources).enumerate() {
             if !model.matches(need, *r) {
                 return Err(StateError::NoMatch {
                     job: j,
@@ -481,6 +548,9 @@ impl State {
             }
             *take.entry(*r).or_default() += need.amount;
         }
+        if self.may_start_anyway(model, j) {
+            return Ok(take.into_iter().collect());
+        }
         for (r, want) in &take {
             let f = free[r.index()];
             if *want > f {
@@ -492,6 +562,37 @@ impl State {
             }
         }
         Ok(take.into_iter().collect())
+    }
+
+    /// Since when a queued job could start but for resources: the later of its earliest start and the end of
+    /// every job it comes after (a job not done yet counts as now).
+    pub fn ready_since(&self, model: &Model, j: JobId) -> Time {
+        let job = model.job(j);
+        job.after
+            .iter()
+            .map(|d| match &self.status[d.index()] {
+                JobStatus::Done { at, .. } => *at,
+                _ => self.now,
+            })
+            .fold(job.earliest_start(), Time::max)
+    }
+
+    /// When a queued job may start anyway, over capacity (see [`Job::start_anyway_after`]): `None` for a job
+    /// that waits for room.
+    ///
+    /// [`Job::start_anyway_after`]: crate::model::Job::start_anyway_after
+    pub fn start_anyway_at(&self, model: &Model, j: JobId) -> Option<Time> {
+        let after = model.job(j).start_anyway_after?;
+        Some(self.ready_since(model, j) + after)
+    }
+
+    /// Whether a queued job has waited past its [`start_anyway_at`](State::start_anyway_at): it may start
+    /// over capacity on what it is pinned to.
+    pub fn may_start_anyway(&self, model: &Model, j: JobId) -> bool {
+        matches!(self.status[j.index()], JobStatus::Queued)
+            && self
+                .start_anyway_at(model, j)
+                .is_some_and(|t| self.now >= t)
     }
 
     /// A resume takes back the needs it gave up, on the resources it ran on.
@@ -508,7 +609,7 @@ impl State {
             return Err(StateError::ResumeElsewhere(j));
         }
         let mut take: BTreeMap<ResourceId, u64> = BTreeMap::new();
-        for ((need, r), h) in model.job(j).needs.iter().zip(&a.0).zip(held) {
+        for ((need, r), h) in model.job(j).needs_for(a).iter().zip(&a.resources).zip(held) {
             if !h {
                 *take.entry(*r).or_default() += need.amount;
             }
@@ -542,11 +643,16 @@ impl State {
                 return Err(StateError::Twice(*j));
             }
         }
+        let mut anyway = Vec::with_capacity(batch.len());
         for (j, a) in batch {
             let take = self.check_start(model, *j, a, &free)?;
+            let mut over = false;
             for (r, amount) in &take {
-                free[r.index()] -= amount;
+                let f = &mut free[r.index()];
+                over |= *amount > *f;
+                *f = f.saturating_sub(*amount);
             }
+            anyway.push(over);
             if let Some(g) = model.job(*j).group {
                 let split = model.group(g).members.iter().any(|m| {
                     !in_batch.contains(m) && matches!(self.status[m.index()], JobStatus::Queued)
@@ -557,21 +663,27 @@ impl State {
             }
             takes.push(take);
         }
-        for ((j, a), take) in batch.iter().zip(takes) {
+        for (((j, a), take), over) in batch.iter().zip(takes).zip(anyway) {
             for (r, amount) in take {
                 self.used[r.index()] += amount;
                 *self.holders[r.index()].entry(*j).or_default() += amount;
             }
             if let JobStatus::Running { paused, .. } = &mut self.status[j.index()] {
                 let held = paused.take().map(|p| p.held).unwrap_or_default();
-                for ((need, r), h) in model.job(*j).needs.iter().zip(&a.0).zip(held) {
+                for ((need, r), h) in model
+                    .job(*j)
+                    .needs_for(a)
+                    .iter()
+                    .zip(&a.resources)
+                    .zip(held)
+                {
                     if !h {
                         self.apply_state(model, need, *r);
                     }
                 }
                 continue;
             }
-            for (need, r) in model.job(*j).needs.iter().zip(&a.0) {
+            for (need, r) in model.job(*j).needs_for(a).iter().zip(&a.resources) {
                 self.apply_state(model, need, *r);
             }
             self.queued.remove(j);
@@ -583,6 +695,7 @@ impl State {
                 phase_since: self.now,
                 ending: Outcome::Ok,
                 paused: None,
+                over,
             };
         }
         Ok(())
@@ -608,12 +721,12 @@ impl State {
             return Err(StateError::InCleanup(j));
         }
         let job = model.job(j);
-        let held: Vec<bool> = job
-            .needs
+        let needs = job.needs_for(assignment);
+        let held: Vec<bool> = needs
             .iter()
             .map(|n| job.pause_keeps.contains(&n.kind))
             .collect();
-        for ((need, r), h) in job.needs.iter().zip(&assignment.0).zip(&held) {
+        for ((need, r), h) in needs.iter().zip(&assignment.resources).zip(&held) {
             if !h {
                 let ri = r.index();
                 self.used[ri] -= need.amount;
@@ -867,11 +980,14 @@ mod tests {
         s.arrive(a).unwrap();
         s.arrive(b).unwrap();
         let err = s
-            .start(&m, &[(a, Assignment(vec![r])), (b, Assignment(vec![r]))])
+            .start(
+                &m,
+                &[(a, Assignment::new(vec![r])), (b, Assignment::new(vec![r]))],
+            )
             .unwrap_err();
         assert!(matches!(err, StateError::OverCapacity { .. }));
         assert_eq!(s.used(r), 0, "nothing applied");
-        s.start(&m, &[(a, Assignment(vec![r]))]).unwrap();
+        s.start(&m, &[(a, Assignment::new(vec![r]))]).unwrap();
         assert_eq!(s.used(r), 6);
         assert_eq!(s.holders(r).collect::<Vec<_>>(), vec![(a, 6)]);
     }
@@ -883,10 +999,10 @@ mod tests {
         s.arrive(a).unwrap();
         s.arrive(c).unwrap();
         assert!(matches!(
-            s.start(&m, &[(c, Assignment(vec![r]))]),
+            s.start(&m, &[(c, Assignment::new(vec![r]))]),
             Err(StateError::DepNotDone { .. })
         ));
-        s.start(&m, &[(a, Assignment(vec![r]))]).unwrap();
+        s.start(&m, &[(a, Assignment::new(vec![r]))]).unwrap();
         s.set_now(Time(10)).unwrap();
         s.advance(&m, a).unwrap(); // run
         s.advance(&m, a).unwrap(); // cleanup
@@ -900,7 +1016,7 @@ mod tests {
             }
         );
         assert_eq!(s.used(r), 0);
-        s.start(&m, &[(c, Assignment(vec![r]))]).unwrap();
+        s.start(&m, &[(c, Assignment::new(vec![r]))]).unwrap();
     }
 
     #[test]
@@ -909,7 +1025,7 @@ mod tests {
         let mut s = State::new(&m, Time::ZERO);
         s.arrive(a).unwrap();
         s.arrive(c).unwrap();
-        s.start(&m, &[(a, Assignment(vec![r]))]).unwrap();
+        s.start(&m, &[(a, Assignment::new(vec![r]))]).unwrap();
         s.fail(a).unwrap();
         assert!(matches!(
             s.status(a),
@@ -922,7 +1038,7 @@ mod tests {
         s.advance(&m, a).unwrap();
         assert_eq!(s.outcome(a), Some(Outcome::Failed));
         assert_eq!(s.used(r), 0, "cleanup released");
-        assert!(s.start(&m, &[(c, Assignment(vec![r]))]).is_err());
+        assert!(s.start(&m, &[(c, Assignment::new(vec![r]))]).is_err());
     }
 
     #[test]
@@ -947,11 +1063,14 @@ mod tests {
         s.arrive(x).unwrap();
         s.arrive(y).unwrap();
         assert!(matches!(
-            s.start(&m, &[(x, Assignment(vec![r]))]),
+            s.start(&m, &[(x, Assignment::new(vec![r]))]),
             Err(StateError::GroupSplit { .. })
         ));
-        s.start(&m, &[(x, Assignment(vec![r])), (y, Assignment(vec![r]))])
-            .unwrap();
+        s.start(
+            &m,
+            &[(x, Assignment::new(vec![r])), (y, Assignment::new(vec![r]))],
+        )
+        .unwrap();
         assert_eq!(s.used(r), 2);
     }
 }

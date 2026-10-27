@@ -564,7 +564,7 @@ mod tests {
                     *st * 1000,
                     Event::Started {
                         job: id,
-                        assignment: Assignment(Vec::new()),
+                        assignment: Assignment::new(Vec::new()),
                     },
                 ));
                 let outcome = if *ok { Outcome::Ok } else { Outcome::Failed };
