@@ -5,6 +5,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-27
+
 ### Added
 
 - Standing instructions (`standing` module: `Standing`, `Rule`, `Choice`, `Local`, `Go`, `LocalView`,
