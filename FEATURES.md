@@ -72,7 +72,8 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   journaled, replayed) and `Beat::quota`, the windows at or past a level on what the holder holds (soft: plan
   the end; the limit: end now; nothing is taken). Tests: `choreograph/tests/quota.rs`. In `choreographd`: the
   wait line ("waits for a login: login-a has used 84% of its week quota, refills in 1d18h"). Planned: reports
-  through `choreographd`; metrics that count a spent quota as no capacity (today utilisation is against the
+  through `choreographd` (a route and which client may report which resource's quota), `Beat::quota` in
+  its heartbeat answer; metrics that count a spent quota as no capacity (today utilisation is against the
   capacity as if refilled); a job's expected use of the quota in planning.
 - 📋 **EST-3 learned-needs**: needs learned per job kind from the peaks holders report (an open-ended session's
   RAM), as its run length is learned today (CORE-6).
