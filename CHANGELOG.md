@@ -5,6 +5,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-27
+
 ### Added
 
 - Moldable jobs: `Job::shapes`, smaller alternatives to `Job::needs` from larger to smaller; the planners grant
