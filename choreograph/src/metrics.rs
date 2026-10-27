@@ -567,7 +567,7 @@ impl Collector {
                     .map(|(j, o)| (JobId(j.0 - removed.partition_point(|r| *r < j) as u32), o))
                     .collect();
             }
-            // TODO(CORE-6): a paused job counts as holding all it held, and its pause as busy time.
+            // TODO(SIM-6): a paused job counts as holding all it held, and its pause as busy time.
             Event::Failed { .. }
             | Event::Waiting { .. }
             | Event::Paused { .. }

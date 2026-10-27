@@ -161,7 +161,7 @@ pub fn render(view: &QueueView, color: bool) -> String {
         let _ = writeln!(out, "  (none)");
     }
     for j in &view.running {
-        render_running(&mut out, j, view.now);
+        render_running(&mut out, color, j, view.now);
     }
 
     let _ = writeln!(out, "\n{}", bold(color, "QUEUED (priority order)"));
@@ -205,16 +205,41 @@ fn render_node(out: &mut String, color: bool, n: &NodeView) {
     );
 }
 
-fn render_running(out: &mut String, j: &JobView, now: Time) {
+fn render_running(out: &mut String, color: bool, j: &JobView, now: Time) {
     let lease = j.lease.as_ref().map_or("-".to_string(), |l| {
         let held = l
             .held
             .iter()
-            .map(|h| format!("{} ({})", h.resource, h.kind))
+            .map(|h| {
+                let back = if h.given_back { ", given back" } else { "" };
+                format!("{} ({}{back})", h.resource, h.kind)
+            })
             .collect::<Vec<_>>()
             .join(", ");
-        format!("holds {held}, heartbeat within {}", l.expires - now)
+        let mut t = format!("holds {held}, heartbeat within {}", l.expires - now);
+        if let Some(since) = l.paused {
+            t = format!(
+                "{}  {t}",
+                paint(color, "36", &format!("paused {}", now - since))
+            );
+        }
+        if let Some(w) = &j.wait {
+            t.push_str(&format!(
+                "  {}",
+                paint(color, "33", &format!("resuming: {}", fmt_wait(w)))
+            ));
+        }
+        if l.give_way {
+            t.push_str(&format!("  {}", paint(color, "35", "asked to give way")));
+        }
+        t
     });
+    let kind = match (&j.kind, j.open) {
+        (Some(k), true) => format!("  [{k}, open]"),
+        (Some(k), false) => format!("  [{k}]"),
+        (None, true) => "  [open]".into(),
+        (None, false) => String::new(),
+    };
     let eta = j.eta.map_or("-".to_string(), |e| {
         format!(
             "finish p50 {} p90 {}",
@@ -224,7 +249,7 @@ fn render_running(out: &mut String, j: &JobView, now: Time) {
     });
     let _ = writeln!(
         out,
-        "  #{}  {:?}  {}  {lease}  eta {eta}",
+        "  #{}  {:?}{kind}  {}  {lease}  eta {eta}",
         j.id, j.name, j.client
     );
 }
@@ -325,6 +350,8 @@ mod tests {
             id,
             name: name.into(),
             client: client.into(),
+            kind: None,
+            open: false,
             state,
             wait: None,
             eta: None,
@@ -368,7 +395,10 @@ mod tests {
                 node: "node-a".into(),
                 kind: "gate".into(),
                 amount: 1,
+                given_back: false,
             }],
+            paused: None,
+            give_way: false,
         });
         running.eta = Some(EtaView {
             start_p50: None,
@@ -431,6 +461,60 @@ mod tests {
         assert_eq!(rendered, expected);
         // Rendering twice from the same view gives the same text: nothing here reads a clock.
         assert_eq!(rendered, render(&view, false));
+    }
+
+    #[test]
+    fn a_paused_open_job_shows_what_it_gave_back() {
+        let mut view = fixed_view();
+        let now = view.now;
+        let mut s = job(3, "debug", "bench/anna", JobState::Paused);
+        s.kind = Some("session".into());
+        s.open = true;
+        s.wait = Some(WaitView {
+            why: "resource".into(),
+            text: "bench-1/probe is held by job 4 (soak)".into(),
+            job: Some(4),
+            resource: Some("bench-1/probe".into()),
+            kind: Some("probe".into()),
+            at: None,
+        });
+        let held = |resource: &str, kind: &str, given_back| HeldView {
+            resource: resource.into(),
+            node: "bench-1".into(),
+            kind: kind.into(),
+            amount: 1,
+            given_back,
+        };
+        s.lease = Some(LeaseView {
+            token: 9,
+            granted: now - Dur::hours(1),
+            expires: now + Dur::secs(40),
+            held: vec![
+                held("bench-1/dut", "dut", false),
+                held("bench-1/probe", "probe", true),
+            ],
+            paused: Some(now - Dur::mins(5)),
+            give_way: false,
+        });
+        let mut soak = job(4, "soak", "ci", JobState::Running);
+        soak.lease = Some(LeaseView {
+            token: 10,
+            granted: now - Dur::mins(4),
+            expires: now + Dur::secs(50),
+            held: vec![held("bench-1/probe", "probe", false)],
+            paused: None,
+            give_way: true,
+        });
+        view.running = vec![s, soak];
+        let r = render(&view, false);
+        assert!(
+            r.contains(
+                "  #3  \"debug\"  [session, open]  bench/anna  paused 5m  holds bench-1/dut (dut), \
+                 bench-1/probe (probe, given back), heartbeat within 40s  resuming: "
+            ),
+            "{r}"
+        );
+        assert!(r.contains("heartbeat within 50s  asked to give way"), "{r}");
     }
 
     #[test]

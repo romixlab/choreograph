@@ -45,8 +45,8 @@ use tokio_rustls::TlsConnector;
 use tower::ServiceExt;
 
 use crate::api::{
-    ApiError, BeatView, Health, JobRef, JobState, JobView, NodeReport, NodeView, QueueView,
-    Release, SubmitGroup, SubmitJob,
+    ApiError, BeatView, Health, JobRef, JobView, NodeReport, NodeView, QueueView, Release,
+    SubmitGroup, SubmitJob,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -190,11 +190,12 @@ impl Client {
             .await
     }
 
-    /// Waits, as long as it takes, until the job runs or ends.
+    /// Waits, as long as it takes, until the job runs or ends (or, resumed after a pause, has back what it
+    /// gave back).
     pub async fn wait_running(&self, id: JobRef) -> Result<JobView, ClientError> {
         loop {
             let v = self.wait(id, None).await?;
-            if v.state != JobState::Queued {
+            if v.wait.is_none() {
                 return Ok(v);
             }
         }
@@ -219,6 +220,27 @@ impl Client {
             Method::POST,
             &format!("/v1/leases/{token}/release"),
             Some(&Release { outcome }),
+        )
+        .await
+    }
+
+    /// Pauses the lease's job: it gives back what its kind does not keep on pause.
+    pub async fn pause(&self, token: u64) -> Result<JobView, ClientError> {
+        self.call(
+            Method::POST,
+            &format!("/v1/leases/{token}/pause"),
+            None::<&()>,
+        )
+        .await
+    }
+
+    /// The lease's paused job goes on; [`wait_running`](Client::wait_running) then waits until it has back
+    /// what it gave back.
+    pub async fn resume(&self, token: u64) -> Result<JobView, ClientError> {
+        self.call(
+            Method::POST,
+            &format!("/v1/leases/{token}/resume"),
+            None::<&()>,
         )
         .await
     }

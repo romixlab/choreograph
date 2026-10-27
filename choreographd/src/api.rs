@@ -10,6 +10,8 @@
 //! | cancel it | `POST /v1/jobs/{id}/cancel` | | [`JobView`] |
 //! | keep its lease | `POST /v1/leases/{token}/heartbeat` | | [`BeatView`] |
 //! | end its lease | `POST /v1/leases/{token}/release` | [`Release`] | [`JobView`] |
+//! | pause its job | `POST /v1/leases/{token}/pause` | | [`JobView`] |
+//! | go on after a pause | `POST /v1/leases/{token}/resume` | | [`JobView`] |
 //! | report a node | `POST /v1/nodes/{name}` | [`NodeReport`] | [`NodeView`] |
 //! | the queue | `GET /v1/queue` | | [`QueueView`] |
 //! | is it up | `GET /v1/health` (no token) | | [`Health`] |
@@ -22,7 +24,7 @@
 
 use std::collections::BTreeMap;
 
-use choreograph::model::Labels;
+use choreograph::model::{Labels, Preempt};
 use choreograph::{Dur, Outcome, Time};
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -61,6 +63,21 @@ pub struct SubmitJob {
     /// Jobs that must end well first (their ids; they must still be known to the service).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub after: Vec<JobRef>,
+    /// Its kind of work (`session`, `soak`, `gate`): what it leaves out of `open`, `preempt`, `pause_keeps`
+    /// and `run` comes from the configured `[[job_kind]]`, and a missing `run` from what releases of the kind
+    /// have taught.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Open-ended: no time limit, it holds its resources until released (default: its kind's, else bounded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<bool>,
+    /// Whether it may be asked to give way: `never`, `at_phase_boundary`, `ask` (default: its kind's, else
+    /// `never`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preempt: Option<Preempt>,
+    /// The resource kinds a pause keeps held (default: its kind's, else none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_keeps: Option<Vec<String>>,
 }
 
 /// One need of a job.
@@ -126,6 +143,9 @@ pub enum JobState {
     Queued,
     /// Holding its resources under a lease.
     Running,
+    /// Paused by its holder: it keeps its lease and what its kind keeps on pause, gave back the rest, and no
+    /// plan counts on it ending. After a resume it waits (`wait` says why) for what it gave back.
+    Paused,
     /// Ended; `outcome` says how.
     Done,
 }
@@ -137,8 +157,13 @@ pub struct JobView {
     pub name: String,
     /// The client that submitted it.
     pub client: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Open-ended: held until released, its ETA a learned guess.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub open: bool,
     pub state: JobState,
-    /// Why it waits, while queued.
+    /// Why it waits, while queued or resuming after a pause.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<WaitView>,
     /// When it is expected to start and finish, while queued or running.
@@ -199,6 +224,12 @@ pub struct LeaseView {
     pub expires: Time,
     /// What it holds, one per need in the order submitted.
     pub held: Vec<HeldView>,
+    /// Since when its job is paused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<Time>,
+    /// A more important job waits for what it holds: pause or release when you can.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub give_way: bool,
 }
 
 /// One resource a lease holds.
@@ -208,6 +239,9 @@ pub struct HeldView {
     pub node: String,
     pub kind: String,
     pub amount: u64,
+    /// Given back for a pause: taken again on resume.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub given_back: bool,
 }
 
 /// The answer to a heartbeat.
@@ -216,6 +250,10 @@ pub struct BeatView {
     pub expires: Time,
     /// The job was cancelled: stop it, clean up and release.
     pub stop: bool,
+    /// A more important job waits for what it holds: pause or release when you can (only for a job whose
+    /// `preempt` is `ask`). Nothing is taken from it.
+    #[serde(default)]
+    pub give_way: bool,
 }
 
 /// The end of a lease.

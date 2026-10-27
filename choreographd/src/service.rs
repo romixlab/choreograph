@@ -21,7 +21,7 @@ use crate::api::{
     BeatView, EstimateSpec, EtaView, HeldView, JobRef, JobState, JobView, LeaseView, NeedSpec,
     NodeReport, NodeView, QueueView, ResourceView, SubmitGroup, SubmitJob, WaitView,
 };
-use crate::config::{ClientConfig, Config};
+use crate::config::{ClientConfig, Config, JobKindConfig};
 use crate::store::{JobMeta, Line, STATE_VERSION, Store, StoreError};
 
 /// Why a call was refused. Maps to an HTTP status and an [`ApiError`](crate::api::ApiError) code.
@@ -359,7 +359,42 @@ impl Service {
         Ok(BeatView {
             expires: beat.expires,
             stop: beat.stop,
+            give_way: beat.give_way,
         })
+    }
+
+    /// Pauses a lease's job: it keeps its lease and what its kind keeps on pause, gives back the rest, and
+    /// plans no longer count on it ending. Plans again, since what it gave back may start others.
+    pub fn pause(
+        &mut self,
+        client: &ClientConfig,
+        token: u64,
+        now: Time,
+    ) -> Result<JobView, Refusal> {
+        self.begin(now)?;
+        let j = self.own_lease(client, Token(token))?;
+        let id = self.jobs[j.index()].id;
+        self.auth.pause(Token(token)).map_err(Refusal::from)?;
+        self.schedule(now);
+        self.end()?;
+        self.view_by_id(id)
+    }
+
+    /// A paused job goes on: it waits for what it gave back (a wait answers once it has it again) under the
+    /// same lease, which its holder keeps alive meanwhile.
+    pub fn resume(
+        &mut self,
+        client: &ClientConfig,
+        token: u64,
+        now: Time,
+    ) -> Result<JobView, Refusal> {
+        self.begin(now)?;
+        let j = self.own_lease(client, Token(token))?;
+        let id = self.jobs[j.index()].id;
+        self.auth.resume(Token(token)).map_err(Refusal::from)?;
+        self.schedule(now);
+        self.end()?;
+        self.view_by_id(id)
     }
 
     /// Ends a lease with the outcome of its job, frees what it held and plans again.
@@ -672,6 +707,14 @@ impl Service {
                 Err(e) => tracing::error!("the plan's starts were refused: {e}"),
             }
         }
+        for j in self.auth.ask_give_way(plan.give_way.keys().copied()) {
+            let for_job = plan.give_way[&j];
+            tracing::info!(
+                "job {} is asked to give way for job {}",
+                self.jobs[j.index()].id,
+                self.jobs[for_job.index()].id
+            );
+        }
         self.wake_at = plan.wake_at;
         self.waits = plan
             .waits
@@ -763,11 +806,43 @@ impl Service {
                 p90: e.p90.unwrap_or(e.p50),
             })
         };
+        let kind = req.kind.as_deref().map(|k| {
+            self.config.job_kind(k).cloned().unwrap_or(JobKindConfig {
+                name: k.into(),
+                ..JobKindConfig::default()
+            })
+        });
+        if kind.as_ref().is_some_and(|k| k.name.is_empty()) {
+            return Err(Refusal::Invalid("a job kind needs a name".into()));
+        }
+        // The run: the job's own guess, else what the kind has taught, else the kind's configured guess.
+        let run = match req.run {
+            Some(r) => est(Some(r)),
+            None => kind
+                .as_ref()
+                .and_then(|k| self.auth.learned(&k.name))
+                .unwrap_or_else(|| est(kind.as_ref().and_then(|k| k.run))),
+        };
+        let model = self.auth.live().model();
+        let mut pause_keeps = Vec::new();
+        for name in req
+            .pause_keeps
+            .as_ref()
+            .or(kind.as_ref().map(|k| &k.pause_keeps))
+            .into_iter()
+            .flatten()
+        {
+            pause_keeps.push(
+                model.kind_by_name(name).ok_or_else(|| {
+                    Refusal::Invalid(format!("pause_keeps: unknown kind {name:?}"))
+                })?,
+            );
+        }
         let mut job = Job::new(model_name(id, &req.name));
         job.needs = needs;
         job.phases = Phases {
             setup: est(req.setup),
-            run: est(req.run),
+            run,
             cleanup: est(req.cleanup),
         };
         job.after = after;
@@ -776,6 +851,13 @@ impl Service {
         job.arrival = now;
         job.release = req.release;
         job.due = req.due;
+        job.open = req.open.or(kind.as_ref().map(|k| k.open)).unwrap_or(false);
+        job.preempt = req
+            .preempt
+            .or(kind.as_ref().map(|k| k.preempt))
+            .unwrap_or_default();
+        job.pause_keeps = pause_keeps;
+        job.kind = kind.map(|k| k.name);
         Ok(job)
     }
 
@@ -899,6 +981,8 @@ impl Service {
             id: meta.id,
             name: shown_name(&model.job(j).name).to_string(),
             client: meta.client.clone(),
+            kind: model.job(j).kind.clone(),
+            open: model.job(j).open,
             state: JobState::Queued,
             wait: None,
             eta: None,
@@ -916,25 +1000,34 @@ impl Service {
                 start_p90: e.p90.map(|s| s.start),
                 finish_p90: e.p90.map(|s| s.finish),
             });
+        let wait = || {
+            self.waits
+                .get(&meta.id)
+                .cloned()
+                .unwrap_or_else(|| WaitView {
+                    why: "planning".into(),
+                    text: "not planned yet".into(),
+                    job: None,
+                    resource: None,
+                    kind: None,
+                    at: None,
+                })
+        };
         match st.status(j) {
             JobStatus::Pending | JobStatus::Queued => {
-                v.wait = Some(
-                    self.waits
-                        .get(&meta.id)
-                        .cloned()
-                        .unwrap_or_else(|| WaitView {
-                            why: "planning".into(),
-                            text: "not planned yet".into(),
-                            job: None,
-                            resource: None,
-                            kind: None,
-                            at: None,
-                        }),
-                );
+                v.wait = Some(wait());
                 v.eta = eta;
             }
-            JobStatus::Running { assignment, .. } => {
-                v.state = JobState::Running;
+            JobStatus::Running {
+                assignment, paused, ..
+            } => {
+                v.state = match paused {
+                    Some(_) => JobState::Paused,
+                    None => JobState::Running,
+                };
+                if paused.as_ref().is_some_and(|p| p.resume) {
+                    v.wait = Some(wait());
+                }
                 v.eta = eta;
                 v.lease = self.auth.lease_of(j).map(|l| LeaseView {
                     token: l.token.0,
@@ -944,16 +1037,20 @@ impl Service {
                         .0
                         .iter()
                         .zip(&model.job(j).needs)
-                        .map(|(r, n)| {
+                        .enumerate()
+                        .map(|(i, (r, n))| {
                             let res = model.resource(*r);
                             HeldView {
                                 resource: res.name.clone(),
                                 node: model.node(res.node).name.clone(),
                                 kind: model.kind(res.kind).name.clone(),
                                 amount: n.amount,
+                                given_back: paused.as_ref().is_some_and(|p| !p.held[i]),
                             }
                         })
                         .collect(),
+                    paused: paused.as_ref().map(|p| p.since),
+                    give_way: l.give_way,
                 });
             }
             JobStatus::Done { at, outcome } => {

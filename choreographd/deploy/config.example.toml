@@ -25,6 +25,15 @@ name = "gate"   # test-gate slots
 name = "main"
 shared = true
 
+# Long work held until its holder releases it (an interactive session): no time limit, asked to give way
+# for a more important job, and a pause keeps its memory but gives back its cores.
+[[job_kind]]
+name = "session"
+open = true
+preempt = "ask"
+pause_keeps = ["ram"]
+run = { p50 = "2h", p90 = "6h" }   # until releases of the kind have taught an estimate
+
 [policy]
 aging_per_class = "1h"
 

@@ -18,11 +18,20 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 - Durations learned per job kind from releases (`Authority::learned`, `Learner::observe_kind`,
   `Learner::estimate_kind`; `Learner` is now serializable) (CORE-6).
 - Job-set keys `kind`, `open`, `pause_keeps`; the example `examples/hil_open.toml` (CORE-6).
+- choreographd: `[[job_kind]]` in the configuration (`open`, `preempt`, `pause_keeps`, a first `run` guess);
+  `SubmitJob` keys `kind`, `open`, `preempt`, `pause_keeps`, a missing `run` taken from what the kind has
+  learned; `POST /v1/leases/{token}/pause` and `/resume` (`Client::pause`, `Client::resume`); `JobState::Paused`,
+  `JobView::kind` and `open`, `LeaseView::paused` and `give_way`, `HeldView::given_back`, `BeatView::give_way`
+  (CORE-6).
+- `choreograph top` shows a job's kind, paused jobs with what they gave back, a resume's wait, and leases asked to
+  give way (CORE-6).
 
 ### Changed
 
 - **Breaking:** `JobStatus::Running` has a `paused` field, `Beat` a `give_way` field, `Plan` a `give_way` map,
   `Policy` the settings `open_floor` and `preempt_gap` (CORE-6).
+- A wait (`POST /v1/jobs/{id}/wait`, `Client::wait_running`) now answers when the job no longer waits, which
+  includes a paused job (CORE-6).
 
 ## [0.3.4] - 2026-10-26
 

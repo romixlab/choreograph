@@ -43,6 +43,8 @@ pub fn router(d: Daemon) -> Router {
         .route("/v1/jobs/{id}/cancel", post(cancel))
         .route("/v1/leases/{token}/heartbeat", post(heartbeat))
         .route("/v1/leases/{token}/release", post(release))
+        .route("/v1/leases/{token}/pause", post(pause))
+        .route("/v1/leases/{token}/resume", post(resume))
         .route("/v1/nodes/{name}", post(report))
         .route("/v1/queue", get(queue))
         .fallback(|| async { Fail::new(StatusCode::NOT_FOUND, "not_found", "no such route") })
@@ -248,6 +250,26 @@ async fn release(
     Ok(axum::Json(
         d.call(|s, now| s.release(&c, token, r.outcome, now))?,
     ))
+}
+
+async fn pause(
+    State(d): State<Daemon>,
+    h: HeaderMap,
+    token: Result<Path<u64>, PathRejection>,
+) -> Answer<crate::api::JobView> {
+    let c = client(&d, &h)?;
+    let Path(token) = token?;
+    Ok(axum::Json(d.call(|s, now| s.pause(&c, token, now))?))
+}
+
+async fn resume(
+    State(d): State<Daemon>,
+    h: HeaderMap,
+    token: Result<Path<u64>, PathRejection>,
+) -> Answer<crate::api::JobView> {
+    let c = client(&d, &h)?;
+    let Path(token) = token?;
+    Ok(axum::Json(d.call(|s, now| s.resume(&c, token, now))?))
 }
 
 async fn report(

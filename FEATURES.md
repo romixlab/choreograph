@@ -25,7 +25,7 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   or lost (their jobs requeued or failed), with `NodesDown` as a wait reason; finished jobs compacted with
   dense ids renumbered in order. `State` and both planners read the measured capacity and node state, and the
   list scheduler's profile counts a shortfall until it clears.
-- 🚧 **CORE-6 open-ended-jobs**: done in the library: a job may be open-ended (`Job::open`: no time limit, it
+- ✅ **CORE-6 open-ended-jobs**: a job may be open-ended (`Job::open`: no time limit, it
   holds its resources until released: an agent session, a person debugging on a bench, a long soak test) and
   carry a kind (`Job::kind`); the list scheduler plans it with its estimate while it is young and, once older,
   with the quantile of a lognormal fitted to its p50 and p90 given its age
@@ -37,9 +37,14 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   `Policy::preempt_gap` classes higher that fits only without it, and nothing is taken by force; the authority
   learns how long each kind holds its lease from releases that end well (`Authority::learned`, replayed from the
   journal); the job-set keys `kind`, `open`, `pause_keeps` and `preempt = "ask"`; the bench example
-  `examples/hil_open.toml`. Tests: `choreograph/tests/open_ended.rs`. Planned: job kinds in `choreographd`
-  (submit, pause, resume, give way, learned estimates) and `choreograph top`; needs learned per kind from
-  reported peaks; metrics that count a pause (a paused job counts as holding all it held).
+  `examples/hil_open.toml`. In `choreographd`: `[[job_kind]]` sets `open`, `preempt`, `pause_keeps` and a first
+  `run` guess per kind, a job's own keys win, and a job without `run` takes what releases of its kind taught
+  (`service.rs` `job_from`); `POST /v1/leases/{token}/pause` and `/resume`, `JobState::Paused`, a resumed
+  job's wait answers once it has its resources back, `give_way` on the lease and the heartbeat; `choreograph
+  top` shows paused jobs, what they gave back and who is asked to give way. Tests:
+  `choreograph/tests/open_ended.rs`, `choreographd/tests/e2e.rs` (`an_open_session_...`).
+- 📋 **EST-3 learned-needs**: needs learned per job kind from the peaks holders report (an open-ended session's
+  RAM), as its run length is learned today (CORE-6).
 - 🚧 **EXEC-1 executor-state-machine**: done: leases (`lease.rs`): `Authority` owns a `Live` and grants every
   start as a lease with a fencing token (never reused, rising), a TTL and heartbeats (which also tell the holder
   of a cancel); a release with the outcome ends it, an expiry gives the job's resources back and requeues or
@@ -118,6 +123,8 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   two-regime MMPP fit (`Mmpp2Fit`), service, failures and aborts, measured waits, and the same per lane (the
   job name before `#`); `predicted_wq` (Kingman per lane), `simulate` (the lanes in the simulator under the
   fitted arrivals, empirical service, optional gate slots).
+- 📋 **SIM-6 pause-metrics**: metrics that count a pause: what a paused job gave back as free time, what it
+  keeps as busy time; today a paused job counts as holding all it held (`metrics.rs`, CORE-6).
 
 ## TEST: property tests
 

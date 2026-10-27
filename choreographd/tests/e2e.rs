@@ -601,3 +601,108 @@ async fn without_tokens_callers_name_themselves() {
     assert_eq!(v.state, JobState::Running);
     svc.stop().await;
 }
+
+/// A session on a bench: open-ended, held until released, paused to let a gate run on its slot, resumed on
+/// the same slot, asked to give way for a more important job, and its kind learns how long sessions last.
+#[tokio::test(start_paused = true)]
+async fn an_open_session_pauses_resumes_and_gives_way() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = Svc::open(config(
+        dir.path(),
+        r#"
+[[job_kind]]
+name = "session"
+open = true
+preempt = "ask"
+pause_keeps = ["ram"]
+run = { p50 = "1h", p90 = "3h" }
+[lease]
+ttl = "1h"
+[settings]
+node_stale = "2h"
+queued_stale = "2h"
+"#,
+    ));
+    let (a, b, c) = (svc.client("a"), svc.client("b"), svc.client("c"));
+    svc.client("node-1")
+        .report("node-1", &room(&[("gate", 1), ("ram", 8)]))
+        .await
+        .unwrap();
+    let session = |name: &str| -> SubmitJob {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "kind": "session",
+            "needs": [need("gate", 1), need("ram", 4)],
+        }))
+        .unwrap()
+    };
+
+    let ja = a.submit(&session("debug")).await.unwrap();
+    assert_eq!(ja.state, JobState::Running);
+    assert_eq!((ja.kind.as_deref(), ja.open), (Some("session"), true));
+    let la = ja.lease.clone().unwrap();
+    let jb = b.submit(&gate("gate b")).await.unwrap();
+    assert_eq!(jb.state, JobState::Queued);
+
+    // A pause gives the slot back (ram stays held) and the gate starts on it.
+    sleep(Dur::mins(10).to_std()).await;
+    a.heartbeat(la.token).await.unwrap();
+    let pa = a.pause(la.token).await.unwrap();
+    assert_eq!(pa.state, JobState::Paused);
+    let pl = pa.lease.unwrap();
+    assert_eq!(pl.paused, Some(T0 + Dur::mins(10)));
+    let given_back: Vec<(&str, bool)> = pl
+        .held
+        .iter()
+        .map(|h| (h.kind.as_str(), h.given_back))
+        .collect();
+    assert_eq!(given_back, [("gate", true), ("ram", false)]);
+    let vb = b.wait_running(jb.id).await.unwrap();
+    assert_eq!(vb.state, JobState::Running);
+
+    // A resume waits for the slot under the same lease and gets it back once the gate is done.
+    let ra = a.resume(la.token).await.unwrap();
+    assert_eq!(ra.state, JobState::Paused);
+    assert!(ra.wait.is_some(), "it waits for its slot: {ra:?}");
+    let waiter = tokio::spawn({
+        let a = a.clone();
+        async move { a.wait_running(ja.id).await }
+    });
+    sleep(Dur::secs(20).to_std()).await;
+    a.heartbeat(la.token).await.unwrap();
+    b.release(vb.lease.unwrap().token, Outcome::Ok)
+        .await
+        .unwrap();
+    let back = waiter.await.unwrap().unwrap();
+    assert_eq!(back.state, JobState::Running);
+    assert_eq!(
+        back.lease.unwrap().token,
+        la.token,
+        "the same lease goes on"
+    );
+
+    // A more important job cannot start: the session is asked to give way, and nothing is taken from it.
+    let mut urgent = gate("urgent");
+    urgent.class = 5;
+    let jc = c.submit(&urgent).await.unwrap();
+    assert_eq!(jc.state, JobState::Queued);
+    let beat = a.heartbeat(la.token).await.unwrap();
+    assert!(beat.give_way && !beat.stop);
+    assert!(a.job(ja.id).await.unwrap().lease.unwrap().give_way);
+
+    // It ends; the urgent job starts, and sessions now have a learned length.
+    sleep(Dur::mins(5).to_std()).await;
+    let held = svc.daemon.now() - T0;
+    a.release(la.token, Outcome::Ok).await.unwrap();
+    let vc = c.wait_running(jc.id).await.unwrap();
+    assert_eq!(vc.state, JobState::Running);
+    let learned = svc
+        .daemon
+        .look(|s, _| s.authority().learned("session"))
+        .unwrap();
+    assert_eq!(learned.p50, held);
+    c.release(vc.lease.unwrap().token, Outcome::Ok)
+        .await
+        .unwrap();
+    svc.stop().await;
+}

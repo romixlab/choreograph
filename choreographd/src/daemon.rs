@@ -10,7 +10,7 @@ use choreograph::{Dur, Time};
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use crate::api::{JobRef, JobState, JobView};
+use crate::api::{JobRef, JobView};
 use crate::config::{ClientConfig, Config};
 use crate::service::{Refusal, Service, StartError};
 
@@ -138,7 +138,7 @@ impl Daemon {
         self.lock().caller(bearer, named)
     }
 
-    /// Waits until the job runs or ends, or `timeout` passes (at most `max_wait`), and answers with the job
+    /// Waits until the job runs or ends (a resumed job: until it has back what it gave back), or `timeout` passes (at most `max_wait`), and answers with the job
     /// as it is then. Every call tells the service the client still wants the job.
     pub async fn wait(
         &self,
@@ -156,7 +156,7 @@ impl Daemon {
                 let mut s = self.lock();
                 s.touch(client, id, self.now())?
             };
-            if v.state != JobState::Queued || Instant::now() >= deadline {
+            if v.wait.is_none() || Instant::now() >= deadline {
                 return Ok(v);
             }
             match tokio::time::timeout_at(deadline, rx.changed()).await {

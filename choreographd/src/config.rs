@@ -24,6 +24,13 @@
 //! name = "main"        # one holder at a time per repository, made when a job first names one
 //! shared = true
 //!
+//! [[job_kind]]         # what jobs of a kind are, unless a job says otherwise; every key but name optional
+//! name = "session"
+//! open = true          # no time limit: held until released
+//! preempt = "ask"      # its holder may be asked to give way for a more important job
+//! pause_keeps = ["main"]
+//! run = { p50 = "2h", p90 = "6h" }  # the guess until releases of the kind have taught one
+//!
 //! [policy]             # the list scheduler (choreograph::Policy); every key optional
 //! aging_per_class = "1h"
 //!
@@ -47,10 +54,12 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use choreograph::model::Unit;
+use choreograph::model::{Preempt, Unit};
 use choreograph::{Dur, LeaseSettings, Policy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::api::EstimateSpec;
 
 /// The whole configuration file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -75,6 +84,10 @@ pub struct Config {
     /// The resource kinds. A kind is added when it first appears here and kept after; its unit cannot change.
     #[serde(default, rename = "kind")]
     pub kinds: Vec<KindConfig>,
+    /// The job kinds: what a job that names its kind is unless it says otherwise. A kind without an entry
+    /// takes the defaults (bounded, never preempted, its run learned from earlier releases).
+    #[serde(default, rename = "job_kind")]
+    pub job_kinds: Vec<JobKindConfig>,
     #[serde(default)]
     pub policy: Policy,
     #[serde(default)]
@@ -116,6 +129,30 @@ pub struct KindConfig {
 
 fn one() -> u64 {
     1
+}
+
+/// A kind of job (`session`, `soak`, `gate`): a job names its kind, and what it leaves out comes from here.
+/// Durations are learned per kind from every release that ended well.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobKindConfig {
+    pub name: String,
+    /// Open-ended: no time limit, it holds its resources until its holder releases it (see
+    /// [`choreograph::Job::open`]). Default: bounded.
+    #[serde(default)]
+    pub open: bool,
+    /// Whether a running job may be asked to give way for a more important one: `never` (default),
+    /// `at_phase_boundary` or `ask`.
+    #[serde(default)]
+    pub preempt: Preempt,
+    /// The resource kinds a pause keeps held (they must be configured `[[kind]]`s); everything else is given
+    /// back while paused. Default: none, a pause gives back everything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pause_keeps: Vec<String>,
+    /// How long its run takes before releases of the kind have taught an estimate; a job's own `run` wins
+    /// over both. Default: none (zero).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<EstimateSpec>,
 }
 
 fn socket_mode() -> u32 {
@@ -325,6 +362,20 @@ impl Config {
                 return bad(format!("kind {:?}: capacity 0", k.name));
             }
         }
+        for (i, k) in self.job_kinds.iter().enumerate() {
+            if self.job_kinds[..i].iter().any(|o| o.name == k.name) {
+                return bad(format!("job kind {:?} is declared twice", k.name));
+            }
+            if k.name.is_empty() {
+                return bad("a job kind needs a name".into());
+            }
+            if let Some(r) = k.pause_keeps.iter().find(|r| self.kind(r).is_none()) {
+                return bad(format!(
+                    "job kind {:?}: pause_keeps names {r:?}, which is not a [[kind]]",
+                    k.name
+                ));
+            }
+        }
         for (i, c) in self.clients.iter().enumerate() {
             if self.clients[..i].iter().any(|o| o.name == c.name) {
                 return bad(format!("client {:?} is declared twice", c.name));
@@ -380,6 +431,10 @@ impl Config {
 
     pub fn kind(&self, name: &str) -> Option<&KindConfig> {
         self.kinds.iter().find(|k| k.name == name)
+    }
+
+    pub fn job_kind(&self, name: &str) -> Option<&JobKindConfig> {
+        self.job_kinds.iter().find(|k| k.name == name)
     }
 
     /// Who a call comes from: with tokens, the client its bearer token belongs to; without, the client it
@@ -551,6 +606,8 @@ mod tests {
         let c = Config::parse(include_str!("../deploy/config.example.toml")).unwrap();
         assert_eq!(c.kinds.len(), 4);
         assert!(c.kind("main").unwrap().shared);
+        let session = c.job_kind("session").unwrap();
+        assert!(session.open && session.preempt == Preempt::Ask);
         assert!(!c.tokens && c.tls.is_none());
         let c = Config::parse(include_str!("../deploy/config.tls.example.toml")).unwrap();
         assert!(c.tokens && c.tls.is_some() && c.clients.len() == 2);
@@ -566,6 +623,18 @@ mod tests {
             ),
             ("[[client]]\nname = \"a\"\ntoken_sha256 = \"abc\"", "64 hex"),
             ("bogus = 1", "unknown field"),
+            (
+                "[[job_kind]]\nname = \"s\"\npause_keeps = [\"bench\"]",
+                "not a [[kind]]",
+            ),
+            (
+                "[[job_kind]]\nname = \"s\"\n[[job_kind]]\nname = \"s\"",
+                "twice",
+            ),
+            (
+                "[[job_kind]]\nname = \"s\"\npreempt = \"maybe\"",
+                "unknown variant",
+            ),
             ("[settings]\ntick = \"soon\"", "not a duration"),
         ] {
             let e = Config::parse(&with_clients(&format!("{BASE}\n{extra}")))

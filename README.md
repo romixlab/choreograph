@@ -62,6 +62,7 @@ block); a listener beyond loopback is refused without both.
 | wait until it runs or ends | `POST /v1/jobs/{id}/wait?timeout=30s` |
 | cancel it | `POST /v1/jobs/{id}/cancel` |
 | keep / end its lease | `POST /v1/leases/{token}/heartbeat`, `POST /v1/leases/{token}/release` |
+| pause / go on (open-ended jobs) | `POST /v1/leases/{token}/pause`, `POST /v1/leases/{token}/resume` |
 | report a node | `POST /v1/nodes/{name}` |
 | the queue | `GET /v1/queue` |
 | is it up (no token) | `GET /v1/health` |
