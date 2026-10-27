@@ -222,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "choreograph"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "libm",
  "proptest",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "choreograph_cli"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "choreograph",
  "choreographd",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "choreographd"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "axum",
  "bytes",

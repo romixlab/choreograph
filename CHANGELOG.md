@@ -5,6 +5,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-27
+
 ### Added
 
 - Open-ended jobs (`Job::open`) and job kinds (`Job::kind`): planned with their estimate while young and from
@@ -25,7 +27,6 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
   (CORE-6).
 - `choreograph top` shows a job's kind, paused jobs with what they gave back, a resume's wait, and leases asked to
   give way (CORE-6).
-
 - Budgets on a lease (`budget` module: `Budget`, `Meter`, `Scope`, `OnHard`, `Usage`, `Crossing`, `Level`;
   `Job::budgets`, the job-set key `budgets`): `Authority::report_use` and `Beat::over` tell the holder which
   levels it crossed, a `stop` budget's hard level cancels the job (SESS-1).
