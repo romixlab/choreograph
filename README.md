@@ -53,7 +53,10 @@ and trusts whoever may open it, which is decided by the socket's file mode: a ca
 call is one request and one answer, and a wait is held at most its `timeout`, or answers at once with
 `timeout=0`. Without such a proxy the service listens on TCP with TLS (rustls, no C) and one bearer token per
 client (`tokens = true`; `choreographd token node-a --report node-a` makes a token and its `[[client]]`
-block); a listener beyond loopback is refused without both.
+block); a listener beyond loopback is refused without both. A proxy built into the same process as the
+service (`choreographd::front`) has no listener and no token: it hands over each call as data (method, path,
+query, body) with the caller it has verified, `"NODE"` or `"NODE/USER"`, which a `[[client]]`'s `principal`
+names, and gets back the same status and body a listener would send.
 
 | Call | Path |
 |---|---|

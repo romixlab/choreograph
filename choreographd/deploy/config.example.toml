@@ -61,3 +61,15 @@ pair_window = "10m"
 node_stale = "2m"
 queued_stale = "3m"
 max_wait = "60s"
+
+# For a proxy in the same process that verifies its callers itself (choreographd::front): each caller it
+# vouches for is a client by its principal, "NODE" for a machine or "NODE/USER" for a user on it, no token.
+# A machine may report itself; a user only submits and keeps its own jobs.
+# [[client]]
+# name = "build-1"
+# principal = "build-1"
+# report = ["build-1"]
+#
+# [[client]]
+# name = "build-1/alice"
+# principal = "build-1/alice"

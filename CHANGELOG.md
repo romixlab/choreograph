@@ -5,6 +5,19 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Added
+
+- choreographd: `front`, the API for a proxy in the same process that verifies its callers itself: `Front::call`
+  takes an `ApiRequest` (method, path, query, body) and the identity it vouches for and answers with the
+  router's status and body unchanged (`ApiAnswer`); `[[client]] principal = "NODE"` or `"NODE/USER"` names
+  who that is, with the client's `report` rights and no token; `Client::front` calls through it (SVC-5).
+
+### Changed
+
+- **Breaking:** `config::ClientConfig::token_sha256` is an `Option`, and `ClientConfig` has the field
+  `principal`; a `[[client]]` needs a token, a principal or both, and principal-only clients are allowed
+  without `tokens = true` (SVC-5).
+
 ## [0.6.1] - 2026-10-27
 
 ### Added

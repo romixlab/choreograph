@@ -12,6 +12,7 @@
 //! - [`daemon`]: the service under tokio's clock: the ticker and the long-poll waits.
 //! - [`store`]: the journal on disk.
 //! - [`http`]: the routes, authorised by bearer tokens.
+//! - [`front`]: the routes for a proxy in the same process that vouches for its callers.
 //! - [`tls`]: TLS on a pure-Rust crypto provider, the accept loop.
 //! - [`client`]: a typed client, over HTTPS or straight into a router in the same process.
 
@@ -19,6 +20,7 @@ pub mod api;
 pub mod client;
 pub mod config;
 pub mod daemon;
+pub mod front;
 pub mod http;
 pub mod listen;
 pub mod service;

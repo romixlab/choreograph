@@ -19,7 +19,8 @@
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::rejection::{BytesRejection, PathRejection, QueryRejection};
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -32,6 +33,7 @@ use crate::api::{
 };
 use crate::config::ClientConfig;
 use crate::daemon::Daemon;
+use crate::front::Vouched;
 use crate::service::Refusal;
 
 /// The service's routes on a daemon.
@@ -67,7 +69,7 @@ pub struct Fail {
 }
 
 impl Fail {
-    fn new(status: StatusCode, code: &str, message: impl Into<String>) -> Fail {
+    pub(crate) fn new(status: StatusCode, code: &str, message: impl Into<String>) -> Fail {
         Fail {
             status,
             body: ApiError {
@@ -134,7 +136,22 @@ type Answer<T> = Result<axum::Json<T>, Fail>;
 /// The header a caller names its client in when the service runs without tokens.
 pub const CLIENT_HEADER: &str = "choreograph-client";
 
-/// The client of a call: from its `Authorization: Bearer` header with tokens, else from its
+/// The client of a call: the one a [front](crate::front) vouches for, else from its `Authorization: Bearer`
+/// header with tokens, else from its [`CLIENT_HEADER`].
+struct Caller(ClientConfig);
+
+impl FromRequestParts<Daemon> for Caller {
+    type Rejection = Fail;
+
+    async fn from_request_parts(parts: &mut Parts, d: &Daemon) -> Result<Caller, Fail> {
+        if let Some(Vouched(c)) = parts.extensions.get::<Vouched>() {
+            return Ok(Caller(c.clone()));
+        }
+        client(d, &parts.headers).map(Caller)
+    }
+}
+
+/// The client a listener's call names: from its `Authorization: Bearer` header with tokens, else from its
 /// [`CLIENT_HEADER`].
 fn client(d: &Daemon, h: &HeaderMap) -> Result<ClientConfig, Fail> {
     let text = |name| {
@@ -170,30 +187,27 @@ async fn health(State(d): State<Daemon>) -> axum::Json<Health> {
 
 async fn submit(
     State(d): State<Daemon>,
-    h: HeaderMap,
+    Caller(c): Caller,
     b: Result<Bytes, BytesRejection>,
 ) -> Answer<crate::api::JobView> {
-    let c = client(&d, &h)?;
     let req: SubmitJob = body(b)?;
     Ok(axum::Json(d.call(|s, now| s.submit(&c, req, now))?))
 }
 
 async fn submit_group(
     State(d): State<Daemon>,
-    h: HeaderMap,
+    Caller(c): Caller,
     b: Result<Bytes, BytesRejection>,
 ) -> Answer<Vec<crate::api::JobView>> {
-    let c = client(&d, &h)?;
     let req: SubmitGroup = body(b)?;
     Ok(axum::Json(d.call(|s, now| s.submit_group(&c, req, now))?))
 }
 
 async fn job(
     State(d): State<Daemon>,
-    h: HeaderMap,
+    _: Caller,
     id: Result<Path<u64>, PathRejection>,
 ) -> Answer<crate::api::JobView> {
-    client(&d, &h)?;
     let Path(id) = id?;
     Ok(axum::Json(d.look(|s, _| s.job(id))?))
 }
@@ -207,11 +221,10 @@ struct WaitQuery {
 
 async fn wait(
     State(d): State<Daemon>,
-    h: HeaderMap,
+    Caller(c): Caller,
     id: Result<Path<u64>, PathRejection>,
     q: Result<Query<WaitQuery>, QueryRejection>,
 ) -> Answer<crate::api::JobView> {
-    let c = client(&d, &h)?;
     let Path(id) = id?;
     let Query(q) = q?;
     let timeout = match q.timeout {
@@ -228,31 +241,28 @@ async fn wait(
 
 async fn cancel(
     State(d): State<Daemon>,
-    h: HeaderMap,
+    Caller(c): Caller,
     id: Result<Path<u64>, PathRejection>,
 ) -> Answer<crate::api::JobView> {
-    let c = client(&d, &h)?;
     let Path(id) = id?;
     Ok(axum::Json(d.call(|s, now| s.cancel(&c, id, now))?))
 }
 
 async fn heartbeat(
     State(d): State<Daemon>,
-    h: HeaderMap,
+    Caller(c): Caller,
     token: Result<Path<u64>, PathRejection>,
 ) -> Answer<crate::api::BeatView> {
-    let c = client(&d, &h)?;
     let Path(token) = token?;
     Ok(axum::Json(d.call(|s, now| s.heartbeat(&c, token, now))?))
 }
 
 async fn release(
     State(d): State<Daemon>,
-    h: HeaderMap,
+    Caller(c): Caller,
     token: Result<Path<u64>, PathRejection>,
     b: Result<Bytes, BytesRejection>,
 ) -> Answer<crate::api::JobView> {
-    let c = client(&d, &h)?;
     let Path(token) = token?;
     let r: Release = body(b)?;
     Ok(axum::Json(
@@ -262,31 +272,28 @@ async fn release(
 
 async fn pause(
     State(d): State<Daemon>,
-    h: HeaderMap,
+    Caller(c): Caller,
     token: Result<Path<u64>, PathRejection>,
 ) -> Answer<crate::api::JobView> {
-    let c = client(&d, &h)?;
     let Path(token) = token?;
     Ok(axum::Json(d.call(|s, now| s.pause(&c, token, now))?))
 }
 
 async fn resume(
     State(d): State<Daemon>,
-    h: HeaderMap,
+    Caller(c): Caller,
     token: Result<Path<u64>, PathRejection>,
 ) -> Answer<crate::api::JobView> {
-    let c = client(&d, &h)?;
     let Path(token) = token?;
     Ok(axum::Json(d.call(|s, now| s.resume(&c, token, now))?))
 }
 
 async fn usage(
     State(d): State<Daemon>,
-    h: HeaderMap,
+    Caller(c): Caller,
     token: Result<Path<u64>, PathRejection>,
     b: Result<Bytes, BytesRejection>,
 ) -> Answer<crate::api::UsageView> {
-    let c = client(&d, &h)?;
     let Path(token) = token?;
     let r: UseReport = body(b)?;
     Ok(axum::Json(
@@ -296,21 +303,19 @@ async fn usage(
 
 async fn restart(
     State(d): State<Daemon>,
-    h: HeaderMap,
+    Caller(c): Caller,
     token: Result<Path<u64>, PathRejection>,
 ) -> Answer<crate::api::JobView> {
-    let c = client(&d, &h)?;
     let Path(token) = token?;
     Ok(axum::Json(d.call(|s, now| s.restart(&c, token, now))?))
 }
 
 async fn tell(
     State(d): State<Daemon>,
-    h: HeaderMap,
+    Caller(c): Caller,
     id: Result<Path<u64>, PathRejection>,
     b: Result<Bytes, BytesRejection>,
 ) -> Answer<crate::api::JobView> {
-    let c = client(&d, &h)?;
     let Path(id) = id?;
     let t: TellJob = body(b)?;
     Ok(axum::Json(d.call(|s, now| s.tell(&c, id, t, now))?))
@@ -318,11 +323,10 @@ async fn tell(
 
 async fn report(
     State(d): State<Daemon>,
-    h: HeaderMap,
+    Caller(c): Caller,
     name: Result<Path<String>, PathRejection>,
     b: Result<Bytes, BytesRejection>,
 ) -> Answer<crate::api::NodeView> {
-    let c = client(&d, &h)?;
     let Path(name) = name?;
     let r: NodeReport = body(b)?;
     Ok(axum::Json(d.call(|s, now| s.report(&c, &name, r, now))?))
@@ -330,15 +334,13 @@ async fn report(
 
 async fn standing(
     State(d): State<Daemon>,
-    h: HeaderMap,
+    _: Caller,
     name: Result<Path<String>, PathRejection>,
 ) -> Answer<crate::api::Standing> {
-    client(&d, &h)?;
     let Path(name) = name?;
     Ok(axum::Json(d.look(|s, _| s.standing(&name))?))
 }
 
-async fn queue(State(d): State<Daemon>, h: HeaderMap) -> Answer<crate::api::QueueView> {
-    client(&d, &h)?;
+async fn queue(State(d): State<Daemon>, _: Caller) -> Answer<crate::api::QueueView> {
     Ok(axum::Json(d.look(|s, _| s.queue())))
 }

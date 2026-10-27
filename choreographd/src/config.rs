@@ -65,6 +65,10 @@
 //! name = "node-a"
 //! token_sha256 = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 //! report = ["node-a"]  # the nodes it may report; "*" for any
+//!
+//! [[client]]           # a caller a proxy in the same process vouches for (crate::front), no token
+//! name = "alice"
+//! principal = "node-a/alice"  # "NODE" or "NODE/USER", as the proxy names who it verified
 //! ```
 //!
 //! Durations are written like `1h30m` or as milliseconds. Unknown keys are refused, so a typo is an error,
@@ -121,7 +125,7 @@ pub struct Config {
     pub lease: LeaseSettings,
     #[serde(default)]
     pub settings: Settings,
-    /// Who may talk to the service, one token each.
+    /// Who may talk to the service: with a token, or as the principal a [front](crate::front) vouches for.
     #[serde(default, rename = "client")]
     pub clients: Vec<ClientConfig>,
 }
@@ -358,13 +362,22 @@ impl<'de> Deserialize<'de> for Listen {
 
 /// A client and what it may do. Every client may submit jobs, wait for them, keep and release their leases,
 /// cancel them and look at the queue; only its own jobs.
+///
+/// A client calls with its token (`token_sha256`, a service with `tokens = true`), or through a front that
+/// vouches for who calls ([`crate::front`]: a proxy in the same process that has verified the caller itself)
+/// under its `principal`, or both ways. It needs at least one of them.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientConfig {
     pub name: String,
     /// The SHA-256 of its token, hex (`choreographd token` makes a token and prints this line). The token
     /// itself is never stored here.
-    pub token_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_sha256: Option<String>,
+    /// Who the client is to a front that vouches for its callers: `"NODE"` (a machine) or `"NODE/USER"` (a
+    /// user on it), matched exactly against the identity the front passes. No token on that path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
     /// The nodes it may report (`"*"`: any).
     #[serde(default)]
     pub report: Vec<String>,
@@ -486,11 +499,16 @@ impl Config {
                 self.socket_mode
             ));
         }
-        if self.tokens && self.clients.is_empty() {
+        if self.tokens && !self.clients.iter().any(|c| c.token_sha256.is_some()) {
             return bad("tokens = true but no [[client]] has a token".into());
         }
-        if !self.tokens && !self.clients.is_empty() {
-            return bad("[[client]] tokens are used only with tokens = true".into());
+        if !self.tokens
+            && let Some(c) = self.clients.iter().find(|c| c.token_sha256.is_some())
+        {
+            return bad(format!(
+                "client {:?}: token_sha256 is used only with tokens = true",
+                c.name
+            ));
         }
         self.policy
             .check()
@@ -539,22 +557,46 @@ impl Config {
             if self.clients[..i].iter().any(|o| o.name == c.name) {
                 return bad(format!("client {:?} is declared twice", c.name));
             }
-            if parse_hash(&c.token_sha256).is_none() {
+            if c.token_sha256.is_none() && c.principal.is_none() {
                 return bad(format!(
-                    "client {:?}: token_sha256 is not 64 hex digits",
+                    "client {:?} has neither token_sha256 nor principal: nobody could call as it",
                     c.name
                 ));
             }
-            if self
-                .clients
-                .iter()
-                .take(i)
-                .any(|o| o.token_sha256.eq_ignore_ascii_case(&c.token_sha256))
-            {
-                return bad(format!(
-                    "client {:?} has the same token as another client",
-                    c.name
-                ));
+            if let Some(t) = &c.token_sha256 {
+                if parse_hash(t).is_none() {
+                    return bad(format!(
+                        "client {:?}: token_sha256 is not 64 hex digits",
+                        c.name
+                    ));
+                }
+                if self.clients[..i]
+                    .iter()
+                    .filter_map(|o| o.token_sha256.as_deref())
+                    .any(|o| o.eq_ignore_ascii_case(t))
+                {
+                    return bad(format!(
+                        "client {:?} has the same token as another client",
+                        c.name
+                    ));
+                }
+            }
+            if let Some(p) = &c.principal {
+                if !valid_principal(p) {
+                    return bad(format!(
+                        "client {:?}: principal {p:?} is not \"NODE\" or \"NODE/USER\"",
+                        c.name
+                    ));
+                }
+                if self.clients[..i]
+                    .iter()
+                    .any(|o| o.principal.as_deref() == Some(p))
+                {
+                    return bad(format!(
+                        "client {:?} has the same principal as another client",
+                        c.name
+                    ));
+                }
             }
             if c.report.iter().any(|n| n == &self.settings.shared_node) {
                 return bad(format!(
@@ -662,9 +704,17 @@ impl Config {
         let name = named.unwrap_or("local");
         valid_client_name(name).then(|| ClientConfig {
             name: name.into(),
-            token_sha256: String::new(),
+            token_sha256: None,
+            principal: None,
             report: vec!["*".into()],
         })
+    }
+
+    /// The client a front vouches for: the one whose `principal` is exactly `principal`. `None`: refused.
+    pub fn client_by_principal(&self, principal: &str) -> Option<&ClientConfig> {
+        self.clients
+            .iter()
+            .find(|c| c.principal.as_deref() == Some(principal))
     }
 
     /// The client a bearer token belongs to. Compares the token's hash with every client's, without stopping
@@ -673,7 +723,7 @@ impl Config {
         let h: [u8; 32] = Sha256::digest(token.as_bytes()).into();
         let mut found = None;
         for c in &self.clients {
-            let Some(want) = parse_hash(&c.token_sha256) else {
+            let Some(want) = c.token_sha256.as_deref().and_then(parse_hash) else {
                 continue;
             };
             let diff = want
@@ -691,6 +741,15 @@ impl Config {
 /// A client name a caller may give itself: 1 to 128 visible ASCII characters.
 pub fn valid_client_name(name: &str) -> bool {
     (1..=128).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_graphic())
+}
+
+/// A client's principal: `NODE` or `NODE/USER`, each part 1 to 128 visible ASCII characters without `/`.
+pub fn valid_principal(p: &str) -> bool {
+    let part = |s: &str| valid_client_name(s) && !s.contains('/');
+    match p.split_once('/') {
+        Some((node, user)) => part(node) && part(user),
+        None => part(p),
+    }
 }
 
 /// The hex SHA-256 of a token, as `token_sha256` takes it.
@@ -837,6 +896,89 @@ mod tests {
         assert!(c.client_by_token("tc").is_none());
         assert!(c.clients[0].may_report("n1") && !c.clients[0].may_report("n2"));
         assert_eq!(new_token().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn principals_are_matched_exactly_and_need_no_token() {
+        let t = r#"
+            state_dir = "/var/lib/choreographd"
+            [[client]]
+            name = "node-a"
+            principal = "node-a"
+            report = ["node-a"]
+            [[client]]
+            name = "alice"
+            principal = "node-a/alice"
+        "#;
+        let c = Config::parse(t).unwrap();
+        assert_eq!(c.client_by_principal("node-a").unwrap().name, "node-a");
+        assert_eq!(c.client_by_principal("node-a/alice").unwrap().name, "alice");
+        for other in ["node-b", "node-a/bob", "alice", "node-a/", "NODE-A", ""] {
+            assert!(c.client_by_principal(other).is_none(), "{other:?}");
+        }
+        assert!(c.client_by_token("").is_none());
+        // The socket's callers still name themselves.
+        assert_eq!(c.caller(None, Some("x")).unwrap().name, "x");
+
+        // Beside tokens: a client may have both, and principal-only clients are no token clients.
+        let both = format!(
+            "{BASE}\n[[client]]\nname = \"a\"\ntoken_sha256 = \"{}\"\nprincipal = \"n1\"\n[[client]]\nname = \"m\"\nprincipal = \"n1/m\"\n",
+            token_hash("ta")
+        );
+        let c = Config::parse(&both).unwrap();
+        assert_eq!(c.client_by_token("ta").unwrap().name, "a");
+        assert_eq!(c.client_by_principal("n1").unwrap().name, "a");
+        assert_eq!(c.client_by_principal("n1/m").unwrap().name, "m");
+        let only = format!("{BASE}\n[[client]]\nname = \"m\"\nprincipal = \"n1/m\"\n");
+        assert!(
+            Config::parse(&only)
+                .unwrap_err()
+                .to_string()
+                .contains("no [[client]] has a token")
+        );
+
+        assert!(valid_principal("n") && valid_principal("n/u"));
+        for bad in ["", "/", "n/", "/u", "n/u/v", "a b", "n/\u{e9}"] {
+            assert!(!valid_principal(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn principal_mistakes_are_refused() {
+        let base = "state_dir = \"/var/lib/choreographd\"\n";
+        for (extra, want) in [
+            (
+                "[[client]]\nname = \"a\"",
+                "neither token_sha256 nor principal",
+            ),
+            (
+                "[[client]]\nname = \"a\"\nprincipal = \"n/u/v\"",
+                "is not \"NODE\" or \"NODE/USER\"",
+            ),
+            (
+                "[[client]]\nname = \"a\"\nprincipal = \"n\"\n[[client]]\nname = \"b\"\nprincipal = \"n\"",
+                "same principal",
+            ),
+            (
+                "[[client]]\nname = \"a\"\nprincipal = \"n\"\n[[client]]\nname = \"a\"\nprincipal = \"m\"",
+                "declared twice",
+            ),
+            (
+                "[[client]]\nname = \"a\"\nprincipal = \"n\"\nreport = [\"shared\"]",
+                "the shared node",
+            ),
+        ] {
+            let e = Config::parse(&format!("{base}{extra}"))
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(want), "{extra}: {e}");
+        }
+        let token = format!(
+            "{base}[[client]]\nname = \"a\"\ntoken_sha256 = \"{}\"",
+            token_hash("ta")
+        );
+        let e = Config::parse(&token).unwrap_err().to_string();
+        assert!(e.contains("used only with tokens = true"), "{e}");
     }
 
     #[test]

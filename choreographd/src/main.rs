@@ -227,11 +227,7 @@ fn check(path: &Path) -> ExitCode {
                 config.listen,
                 if config.tls.is_some() { " (TLS)" } else { "" },
                 config.kinds.len(),
-                if config.tokens {
-                    format!("{} clients with tokens", config.clients.len())
-                } else {
-                    "no tokens".into()
-                },
+                clients(&config),
                 config.state_dir.display()
             );
             ExitCode::SUCCESS
@@ -287,4 +283,19 @@ fn token(name: &str, report: &[String]) -> ExitCode {
 
 fn toml_str(s: &str) -> String {
     toml::Value::String(s.into()).to_string()
+}
+
+/// The clients `check` names: how many call with a token, how many by principal.
+fn clients(config: &Config) -> String {
+    let count = |f: fn(&choreographd::config::ClientConfig) -> bool| {
+        config.clients.iter().filter(|c| f(c)).count()
+    };
+    let tokens = count(|c| c.token_sha256.is_some());
+    let principals = count(|c| c.principal.is_some());
+    match (config.tokens, principals) {
+        (true, 0) => format!("{tokens} clients with tokens"),
+        (true, p) => format!("{tokens} clients with tokens, {p} by principal"),
+        (false, 0) => "no tokens".into(),
+        (false, p) => format!("no tokens, {p} clients by principal"),
+    }
 }

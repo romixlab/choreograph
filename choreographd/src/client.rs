@@ -2,7 +2,8 @@
 //!
 //! The transports, a new connection per call: [`Client::unix`] to the service's Unix socket, [`Client::http`]
 //! to a plain TCP listener on loopback, [`Client::https`] to a TLS listener (the roots it trusts from a PEM
-//! file), and [`Client::local`], straight into a [`Router`] in the same process (tests, an embedded service).
+//! file), [`Client::local`], straight into a [`Router`] in the same process (tests, an embedded service), and
+//! [`Client::front`], through a [`Front`] in the same process as the principal it vouches for.
 //! A client carries a token ([`Client::with_token`]) for a service with `tokens = true`, else the name it
 //! calls as ([`Client::named`]; `local` when it gives none).
 //!
@@ -49,6 +50,7 @@ use crate::api::{
     ApiError, BeatView, Health, JobRef, JobView, NodeReport, NodeView, QueueView, Release,
     Standing, SubmitGroup, SubmitJob, TellJob, UsageView, UseReport,
 };
+use crate::front::{ApiRequest, Front};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -87,6 +89,8 @@ enum Transport {
     Http(String),
     Unix(PathBuf),
     Local(Router),
+    /// Through a front, as the principal it vouches for.
+    Front(Front, String),
 }
 
 /// A client with its token or name. Cheap to clone.
@@ -148,6 +152,12 @@ impl Client {
     /// A client calling the router in this process.
     pub fn local(router: Router) -> Client {
         Client::on(Transport::Local(router))
+    }
+
+    /// A client calling through a [`Front`] in this process as `principal`, which the front vouches for
+    /// (a `[[client]]`'s `principal`); no token or name is sent on that path.
+    pub fn front(front: Front, principal: &str) -> Client {
+        Client::on(Transport::Front(front, principal.into()))
     }
 
     /// The same client with this token (a service with `tokens = true`).
@@ -318,7 +328,7 @@ impl Client {
             None => Bytes::new(),
         };
         let mut req = Request::builder()
-            .method(method)
+            .method(method.clone())
             .uri(path)
             .header(header::CONTENT_TYPE, "application/json");
         if let Some(t) = &self.token {
@@ -328,6 +338,20 @@ impl Client {
             req = req.header(crate::http::CLIENT_HEADER, n.as_str());
         }
         let (status, bytes) = match &self.transport {
+            Transport::Front(front, principal) => {
+                let (path, query) = path.split_once('?').unwrap_or((path, ""));
+                let req = ApiRequest {
+                    method: method.as_str().into(),
+                    path: path.into(),
+                    query: query.into(),
+                    body: String::from_utf8(body.to_vec())
+                        .map_err(|e| ClientError::Transport(e.to_string()))?,
+                };
+                let a = front.call(principal, req).await;
+                let status = StatusCode::from_u16(a.status)
+                    .map_err(|e| ClientError::Transport(e.to_string()))?;
+                (status, Bytes::from(a.body))
+            }
             Transport::Local(router) => {
                 let req = req
                     .body(axum::body::Body::from(body))

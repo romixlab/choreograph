@@ -138,6 +138,11 @@ impl Daemon {
         self.lock().caller(bearer, named)
     }
 
+    /// The client a front vouches for by its principal (see [`Config::client_by_principal`]).
+    pub fn client_by_principal(&self, principal: &str) -> Option<ClientConfig> {
+        self.lock().config().client_by_principal(principal).cloned()
+    }
+
     /// Waits until the job runs or ends (a resumed job: until it has back what it gave back), or `timeout` passes (at most `max_wait`), and answers with the job
     /// as it is then. Every call tells the service the client still wants the job.
     pub async fn wait(

@@ -213,6 +213,16 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   `config.hil-bench.example.toml`. Tests: `standing.rs` (proptests: never over `max` or a share, expired
   always waits, lone never runs out), `choreographd/tests/e2e.rs` (`a_report_answer_carries_...`,
   `local_jobs_are_counted_after_a_reconnect`, `the_most_specific_standing_entry_...`).
+- ✅ **SVC-5 vouched-front**: the API for a proxy built into the same process that verifies its callers itself
+  (`choreographd/src/front.rs`): `Front::call` takes one `ApiRequest` (method, path, query, body as text) and
+  the identity the proxy vouches for, and answers with the router's `ApiAnswer` (status and body, byte for
+  byte what a listener sends). The identity is matched exactly against a `[[client]]`'s `principal`
+  (`"NODE"` or `"NODE/USER"`), with that client's rights (the nodes it may `report`, its own jobs and leases);
+  no token and no header on that path, an unnamed identity is `401`. A client has a token, a principal or
+  both; principal clients work with or without `tokens`. `Client::front` calls through it. Generic: the
+  proxy (a mesh's listener) lives with the proxy. Tests: `choreographd/tests/front.rs` (a node reports only
+  itself, a member never its node; a member touches only its own jobs and leases; only named principals get
+  in; answers equal the token path's byte for byte), `config.rs` (`principal*`).
 
 ## SESS: long sessions on leases
 
