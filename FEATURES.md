@@ -172,7 +172,7 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   reasons, `Expired`); `Standing::lone` for a node with no scheduler, which never runs out. In `choreographd`:
   `[[standing]]` entries in the configuration (selected by `node` or `node_labels` and a job `kind` or `"*"`,
   the most specific winning; `local` and `go` options, `go.best` filled at issue from the live view: up, the
-  labels, policy labels tolerated, most free `rank_by` first; `valid`, `why`; `settings.standing_valid`),
+  labels, policy labels tolerated, most free `rank_by` first; `valid`, `why`; `settings.standing_valid`, a day by default),
   `NodeView::standing` on every report's answer and `GET /v1/nodes/{name}/standing` (`Client::standing`), a
   new serial only when the instruction changes (the service's clock at the change, so it grows across
   restarts), `NodeReport::local` (jobs run under a standing instruction, taken off the node's room until a

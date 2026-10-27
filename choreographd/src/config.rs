@@ -42,7 +42,7 @@
 //!   { local = { max = 2, share = { ram = 800 }, pressure = true } },
 //!   { go = { best = 2, rank_by = "ram" } },
 //! ]
-//! valid = "12h"
+//! valid = "24h"
 //! why = "builds wait for the scheduler on this node"
 //!
 //! [policy]             # the list scheduler (choreograph::Policy); every key optional
@@ -389,7 +389,7 @@ pub struct Settings {
     #[serde(with = "dur")]
     pub handshake: Dur,
     /// How long a standing instruction holds from the moment a node receives it, when its entry gives no
-    /// `valid`.
+    /// `valid`. Default: a day.
     #[serde(with = "dur")]
     pub standing_valid: Dur,
 }
@@ -406,7 +406,7 @@ impl Default for Settings {
             shared_node: "shared".into(),
             max_body: 1 << 20,
             handshake: Dur::secs(10),
-            standing_valid: Dur::hours(12),
+            standing_valid: Dur::hours(24),
         }
     }
 }
@@ -783,6 +783,11 @@ mod tests {
             (0o660, None, false)
         );
         assert_eq!(c.settings, Settings::default());
+        assert_eq!(
+            c.settings.standing_valid,
+            Dur::hours(24),
+            "a day unless raised"
+        );
         assert_eq!(c.policy, Policy::default());
         assert!(c.kinds.is_empty() && c.clients.is_empty());
         // Without tokens a caller names itself, `local` by default, and may report any node.

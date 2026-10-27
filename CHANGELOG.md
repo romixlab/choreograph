@@ -12,7 +12,7 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
   the pure `standing::decide` that applies them (run here within a count and a share of the room, go to another
   node, wait, or ran out); `Standing::lone` for a node with no scheduler (SVC-3).
 - choreographd: `[[standing]]` entries in the configuration (`node`, `node_labels`, `kind`, `options` with
-  `local` and `go`, `valid`, `why`) and `settings.standing_valid`; every report's answer carries the node's
+  `local` and `go`, `valid`, `why`) and `settings.standing_valid` (a day by default); every report's answer carries the node's
   standing instruction (`NodeView::standing`), also at `GET /v1/nodes/{name}/standing` (`Client::standing`);
   `NodeReport::local` lists jobs a node runs under it, counted as used until they end (`NodeView::local`,
   `ResourceView::local`); the example configurations `config.build-fleet.example.toml` and

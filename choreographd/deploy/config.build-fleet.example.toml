@@ -19,26 +19,23 @@ unit = "millicores"
 name = "gate"   # test-gate slots
 
 # On a build machine: builds and bundles keep running there, together at most 80% of its memory and never
-# while it is under memory pressure, for half a day.
+# while it is under memory pressure, for a day (the default validity).
 [[standing]]
 node_labels = { builds = "true" }
 kind = "build"
 options = [{ local = { pool = "heavy", share = { ram = 800, cores = 1000 }, pressure = true } }]
-valid = "12h"
 why = "builds wait for the scheduler on this machine"
 
 [[standing]]
 node_labels = { builds = "true" }
 kind = "dist"
 options = [{ local = { max = 1, pool = "heavy", share = { ram = 800 }, pressure = true } }]
-valid = "12h"
 
 # One test gate at a time on a build machine.
 [[standing]]
 node_labels = { builds = "true" }
 kind = "gate"
 options = [{ local = { max = 1 } }]
-valid = "12h"
 
 # Anywhere else, a gate goes to the build machines with the most free memory when the instruction was
 # made. That list goes stale as the room changes: two hours, then gates wait.
@@ -52,7 +49,6 @@ why = "gates wait for the scheduler"
 [[standing]]
 kind = "land"
 options = [{ local = { max = 1, exclusive = "land" } }]
-valid = "12h"
 
 # A laptop off the network for days builds and tests on its own, for a week.
 [[standing]]
@@ -63,4 +59,4 @@ valid = "7d"
 why = "a week away is the most this laptop runs without the scheduler"
 
 [settings]
-standing_valid = "12h"   # for an entry without its own valid
+standing_valid = "24h"   # for an entry without its own valid (the default); raise it here
