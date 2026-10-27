@@ -5,6 +5,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-27
+
 ### Added
 
 - Resources with a refilling quota (`quota` module: `Quota`, `Window`, `QuotaCrossing`; `State::set_quota`,
