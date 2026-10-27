@@ -60,6 +60,17 @@ pub enum WaitReason {
     },
     /// Every resource that could take this need is on a node that is down.
     NodesDown { need: usize },
+    /// A resource that would take this need has spent a refilling quota (see [`quota`](crate::quota)): the
+    /// window that holds it longest, what it has used of its limit, and when every spent window of it has
+    /// refilled (`None`: not known).
+    Quota {
+        need: usize,
+        resource: ResourceId,
+        window: String,
+        used: u64,
+        limit: u64,
+        reopens: Option<Time>,
+    },
     /// Needs tagged to run on one node cannot all be met on one node now.
     SameNode { tag: String },
     /// No resource can ever satisfy this need: a configuration error.
@@ -249,6 +260,9 @@ pub fn capacity_reason(model: &Model, state: &State, j: JobId, free: &[u64]) -> 
         {
             return WaitReason::NodesDown { need: i };
         }
+        if let Some(why) = quota_reason(model, state, i, &cands, need.amount) {
+            return why;
+        }
         // Prefer naming a single resource whose holders, once gone, would make it fit.
         if let Some(&r) = cands
             .iter()
@@ -274,6 +288,43 @@ pub fn capacity_reason(model: &Model, state: &State, j: JobId, free: &[u64]) -> 
         .find_map(|n| n.same_node.clone())
         .unwrap_or_default();
     WaitReason::SameNode { tag }
+}
+
+/// The quota reason for need `i` when a spent quota is what keeps it off a resource that would otherwise take
+/// it: the one that reopens first (an unknown reset last, ties by id).
+fn quota_reason(
+    model: &Model,
+    state: &State,
+    i: usize,
+    cands: &[ResourceId],
+    amount: u64,
+) -> Option<WaitReason> {
+    cands
+        .iter()
+        .filter_map(|r| {
+            let s = state.spent(*r)?;
+            let open = state
+                .open_capacity(model, *r)
+                .saturating_sub(state.used(*r));
+            (open >= amount).then_some((s.reopens.is_none(), s.reopens, *r, s))
+        })
+        .min_by_key(|(none, at, r, _)| (*none, *at, *r))
+        .map(|(_, _, r, s)| WaitReason::Quota {
+            need: i,
+            resource: r,
+            window: s.window.name.clone(),
+            used: s.window.used,
+            limit: s.window.limit,
+            reopens: s.reopens,
+        })
+}
+
+/// The earliest time after now at which a spent quota refills, for a planner's `wake_at`.
+pub fn next_refill(state: &State) -> Option<Time> {
+    state
+        .quotas()
+        .filter_map(|(_, q)| q.spent_at(state.now())?.reopens)
+        .min()
 }
 
 /// What a paused job that asked to resume takes back: (need index, resource, amount) for every need it gave
@@ -310,6 +361,9 @@ pub fn resume_reason(model: &Model, state: &State, j: JobId, free: &[u64]) -> Op
         if left[r.index()] < amount {
             if !state.node_up(model.resource(r).node) {
                 return Some(WaitReason::NodesDown { need: i });
+            }
+            if let Some(why) = quota_reason(model, state, i, &[r], amount) {
+                return Some(why);
             }
             return Some(WaitReason::Resource {
                 need: i,
@@ -450,6 +504,11 @@ impl Planner for FirstFit {
             decided.extend(members);
         }
         wake_for_start_anyway(model, state, &mut plan);
+        if !plan.waits.is_empty()
+            && let Some(t) = next_refill(state)
+        {
+            plan.wake_at = Some(plan.wake_at.map_or(t, |w| w.min(t)));
+        }
         plan
     }
 }

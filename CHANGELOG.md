@@ -5,6 +5,18 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Added
+
+- Resources with a refilling quota (`quota` module: `Quota`, `Window`, `QuotaCrossing`; `State::set_quota`,
+  `State::spent`, `State::open_capacity`, `Live::set_quota`, `Authority::report_quota`): while a window is
+  spent nothing new starts there; the list scheduler reserves and forecasts from the reset and wakes then;
+  `WaitReason::Quota`; `Beat::quota` tells holders of a window at its soft level or limit (CORE-9).
+- choreographd: the wait line for a quota (CORE-9).
+
+### Changed
+
+- `State::capacity` is 0 while a resource's quota is spent (CORE-9).
+
 ## [0.6.0] - 2026-10-27
 
 ### Added

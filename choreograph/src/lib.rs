@@ -19,6 +19,8 @@
 //!   levels) and what crossing them does.
 //! - [`standing`]: standing instructions, what a node may do while it can't reach the scheduler, and the pure
 //!   [`standing::decide`] that applies them.
+//! - [`quota`]: quotas that refill (a weekly cap, a rate limit): spent windows hold new starts until their
+//!   reset, and the planner books the refill.
 //! - [`plan`]: the [`Planner`] trait, [`Plan`], [`WaitReason`] and the [`FirstFit`] baseline.
 //! - [`cache`]: the result cache: a job with unchanged inputs and a valid result is not run again.
 //! - [`list`]: [`ListScheduler`], the main planner: priorities with aging and deadline urgency, placement,
@@ -76,6 +78,7 @@ pub mod metrics;
 pub mod model;
 pub mod plan;
 pub mod policy;
+pub mod quota;
 pub mod recording;
 pub mod sim;
 pub mod standing;
@@ -95,6 +98,7 @@ pub use model::{
 };
 pub use plan::{FirstFit, Plan, Planner, Reservation, Start, WaitReason};
 pub use policy::{Backfill, Placement, Policy, Quantile};
+pub use quota::{Quota, QuotaCrossing, Window};
 pub use recording::{Profile, ProfileSettings, Recording};
 pub use sim::{SimConfig, SimRun, simulate};
 pub use state::{Assignment, JobStatus, LostJobs, Outcome, Paused, State, StateError};

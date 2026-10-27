@@ -8,6 +8,8 @@
 //!   whose arrival or release time is later waits for it);
 //! - [`Live::set_capacity`] sets a resource's capacity as measured; when it drops below what running jobs hold,
 //!   nothing new starts there and the running jobs keep what they hold;
+//! - [`Live::set_quota`] sets what is left of a resource's refilling quota; while it is spent, nothing new starts
+//!   there until its reset;
 //! - [`Live::set_node_up`] takes a node out of placement (or back), [`Live::node_lost`] drops the jobs that ran
 //!   on a node that is gone;
 //! - [`Live::add_kind`], [`Live::add_node`] and [`Live::add_resource`] grow the fleet, [`Live::set_node_labels`] and
@@ -54,6 +56,7 @@ use crate::model::{
     Resource, ResourceId, Unit,
 };
 use crate::plan::{Plan, Planner};
+use crate::quota::Quota;
 use crate::state::{Assignment, JobStatus, LostJobs, Outcome, State, StateError};
 use crate::time::Time;
 use crate::trace::{Event, Record};
@@ -263,6 +266,11 @@ impl Live {
     /// Replaces a node's policy labels (see [`Node::policy`]). Jobs running there keep running.
     pub fn set_node_policy(&mut self, n: NodeId, policy: Labels) {
         self.model.set_node_policy(n, policy);
+    }
+
+    /// See [`State::set_quota`].
+    pub fn set_quota(&mut self, r: ResourceId, quota: Option<Quota>) {
+        self.state.set_quota(r, quota);
     }
 
     /// See [`State::set_capacity`].

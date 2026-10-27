@@ -61,6 +61,19 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   the shape a moldable job got, a start over capacity and when a queued job starts anyway. Tests:
   `choreographd/tests/e2e.rs` (`a_pinned_build_starts_anyway_past_its_wait_over_capacity`,
   `a_moldable_job_gets_the_largest_shape_that_fits`).
+- 🚧 **CORE-9 quota-resources**: a resource whose use is limited by a quota that refills (a login's weekly
+  cap and short window, an API key's rate limit, a bench's daily duty cycle), reported by a client as
+  `Quota` windows (`quota.rs`: what is used, the limit, a soft level, the reset and an optional refill period);
+  while a window is at or past its soft level (else its limit) the resource's capacity counts as 0
+  (`State::capacity`, `State::spent`), so nothing new starts there and its holders keep running; at the reset
+  the window counts as refilled; the list scheduler books the refill on its profile, so a waiting job gets a
+  reservation and an ETA from the reset and is started then (`Plan::wake_at`); `WaitReason::Quota` names the
+  resource, the window, its use and when it refills, in both planners; `Authority::report_quota` (checked,
+  journaled, replayed) and `Beat::quota`, the windows at or past a level on what the holder holds (soft: plan
+  the end; the limit: end now; nothing is taken). Tests: `choreograph/tests/quota.rs`. In `choreographd`: the
+  wait line ("waits for a login: login-a has used 84% of its week quota, refills in 1d18h"). Planned: reports
+  through `choreographd`; metrics that count a spent quota as no capacity (today utilisation is against the
+  capacity as if refilled); a job's expected use of the quota in planning.
 - 📋 **EST-3 learned-needs**: needs learned per job kind from the peaks holders report (an open-ended session's
   RAM), as its run length is learned today (CORE-6).
 - 🚧 **EXEC-1 executor-state-machine**: done: leases (`lease.rs`): `Authority` owns a `Live` and grants every

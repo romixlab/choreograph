@@ -71,7 +71,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Estimate, JobId, Model, Need, NodeId, Phase, Preempt, ResourceId};
 use crate::plan::{
     Plan, Planner, Reservation, Start, WaitReason, anyway_assignment, capacity_reason, find_shaped,
-    precondition_reason, resume_needs, resume_reason, wake_for_start_anyway,
+    next_refill, precondition_reason, resume_needs, resume_reason, wake_for_start_anyway,
 };
 use crate::policy::{Backfill, Placement, Policy, Quantile};
 use crate::state::{Assignment, JobStatus, State};
@@ -706,6 +706,12 @@ impl Planner for ListScheduler {
                 }
             }
         }
+        // A spent quota gives its capacity back at its refill.
+        for (r, quota) in state.quotas() {
+            if let Some(at) = quota.spent_at(now).and_then(|s| s.reopens) {
+                busy.release_at(r, at, state.open_capacity(model, r));
+            }
+        }
         let mut full = busy.clone();
         self.plan_resumes(model, state, &mut busy, &mut full, &mut plan);
         let mut decided: BTreeSet<JobId> = BTreeSet::new();
@@ -792,6 +798,11 @@ impl Planner for ListScheduler {
         }
         self.ask_give_way(model, state, &busy, &mut plan);
         wake_for_start_anyway(model, state, &mut plan);
+        if !plan.waits.is_empty()
+            && let Some(t) = next_refill(state)
+        {
+            plan.wake_at = Some(plan.wake_at.map_or(t, |w| w.min(t)));
+        }
         plan
     }
 }

@@ -5,15 +5,17 @@
 //! with a [`StateError`], and a batch of starts is applied all together or not at all (a group starts as one).
 //!
 //! The state also holds what is measured or reported from outside: a resource's current capacity
-//! ([`State::set_capacity`]) and whether a node is up ([`State::set_node_up`], [`State::node_lost`]). A capacity
-//! that drops below what is held, or a node that goes down, stops new starts there; the jobs running there keep
-//! what they hold.
+//! ([`State::set_capacity`]), whether a node is up ([`State::set_node_up`], [`State::node_lost`]) and what is
+//! left of a resource's refilling quota ([`State::set_quota`]). A capacity that drops below what is held, a
+//! node that goes down or a quota that is spent stops new starts there; the jobs running there keep what they
+//! hold.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::model::{JobId, Model, Need, NodeId, Phase, Remap, ResourceId};
+use crate::quota::{Quota, Spent};
 use crate::time::Time;
 
 /// How a job's demand is met: which of its shapes (see [`Job::shapes`](crate::model::Job::shapes); 0 is
@@ -209,6 +211,9 @@ pub struct State {
     measured: Vec<Option<u64>>,
     /// Whether each node is up.
     up: Vec<bool>,
+    /// The last reported quota of each resource that has one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    quotas: BTreeMap<ResourceId, Quota>,
 }
 
 /// What happens to the jobs running on a node that is lost.
@@ -239,6 +244,7 @@ impl State {
             running: BTreeSet::new(),
             measured: vec![None; model.resources().len()],
             up: vec![true; model.nodes().len()],
+            quotas: BTreeMap::new(),
         }
     }
 
@@ -321,14 +327,48 @@ impl State {
         self.used[r.index()]
     }
 
-    /// The capacity of a resource now: 0 while its node is down, else the measured one if set, else the
-    /// declared one.
+    /// The capacity of a resource now: 0 while its node is down or its quota is spent, else the measured one
+    /// if set, else the declared one.
     pub fn capacity(&self, model: &Model, r: ResourceId) -> u64 {
+        if self.spent(r).is_some() {
+            return 0;
+        }
+        self.open_capacity(model, r)
+    }
+
+    /// The capacity of a resource once its quota has refilled: as [`capacity`](State::capacity), the quota
+    /// left out.
+    pub fn open_capacity(&self, model: &Model, r: ResourceId) -> u64 {
         let res = model.resource(r);
         if !self.up[res.node.index()] {
             return 0;
         }
         self.measured[r.index()].unwrap_or(res.capacity)
+    }
+
+    /// The last reported quota of a resource, `None` when it has none.
+    pub fn quota(&self, r: ResourceId) -> Option<&Quota> {
+        self.quotas.get(&r)
+    }
+
+    /// Every resource with a reported quota, in id order.
+    pub fn quotas(&self) -> impl Iterator<Item = (ResourceId, &Quota)> {
+        self.quotas.iter().map(|(r, q)| (*r, q))
+    }
+
+    /// Why new starts on a resource wait for its quota now, `None` when they do not.
+    pub fn spent(&self, r: ResourceId) -> Option<Spent<'_>> {
+        self.quotas.get(&r)?.spent_at(self.now)
+    }
+
+    /// Sets what is left of a resource's refilling quota as reported from outside (`None`: it has none). While
+    /// one of its windows is spent, its capacity counts as 0: nothing new starts on it, the jobs that hold it
+    /// keep running; at the window's reset it counts as refilled.
+    pub fn set_quota(&mut self, r: ResourceId, quota: Option<Quota>) {
+        match quota {
+            Some(q) => self.quotas.insert(r, q),
+            None => self.quotas.remove(&r),
+        };
     }
 
     /// The measured capacity of a resource, `None` while the declared one counts.

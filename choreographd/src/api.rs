@@ -267,7 +267,7 @@ pub struct JobView {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WaitView {
     /// The reason's tag: `release`, `dep`, `dep_failed`, `group`, `resource`, `capacity`, `nodes_down`,
-    /// `same_node`, `no_match`, `reserved_for`, `interlock`, `approval`, or `planning` before the first plan.
+    /// `quota`, `same_node`, `no_match`, `reserved_for`, `interlock`, `approval`, or `planning` before the first plan.
     pub why: String,
     /// One line for people: "needs 8 GiB of ram, at most 3 GiB free on one node".
     pub text: String,

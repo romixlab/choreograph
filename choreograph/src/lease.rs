@@ -72,6 +72,7 @@ use crate::model::{
 };
 use crate::plan::{Plan, Planner};
 use crate::policy::dur;
+use crate::quota::{Quota, QuotaCrossing};
 use crate::state::{Assignment, JobStatus, LostJobs, Outcome, StateError};
 use crate::time::{Dur, Time};
 
@@ -206,6 +207,10 @@ pub struct Beat {
     /// Tells for the holder since its last heartbeat, oldest first: each is handed over once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wakes: Vec<Tell>,
+    /// Every quota window at or past a level on a resource the job holds (see [`quota`](crate::quota)): the
+    /// holder plans its end at a soft level and ends at the limit. Nothing is taken from it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quota: Vec<QuotaCrossing>,
 }
 
 /// Why a call was refused. A refused call changes nothing.
@@ -219,6 +224,8 @@ pub enum LeaseError {
     NotHeld { token: Token, resource: ResourceId },
     #[error("lease settings: {0}")]
     Settings(String),
+    #[error("quota: {0}")]
+    Quota(String),
     #[error(
         "jobs {from:?} and {to:?} have told each other back and forth {bounces} times: refused as a loop"
     )]
@@ -295,6 +302,10 @@ pub enum Op {
     SetNodePolicy {
         node: NodeId,
         policy: Labels,
+    },
+    SetQuota {
+        resource: ResourceId,
+        quota: Option<Quota>,
     },
     SetCapacity {
         resource: ResourceId,
@@ -569,6 +580,7 @@ impl Authority {
         );
         let give_way = self.leases[i].give_way;
         let wakes = std::mem::take(&mut self.leases[i].mail);
+        let quota = self.quota_crossings(self.leases[i].job);
         self.log(Op::Heartbeat { token });
         Ok(Beat {
             expires,
@@ -576,7 +588,40 @@ impl Authority {
             give_way,
             over,
             wakes,
+            quota,
         })
+    }
+
+    /// Every quota window at or past a level on the resources job `j` holds now, by resource id.
+    pub fn quota_crossings(&self, j: JobId) -> Vec<QuotaCrossing> {
+        let st = self.live.state();
+        let now = self.now();
+        st.quotas()
+            .filter(|(r, _)| st.holders(*r).any(|(h, _)| h == j))
+            .flat_map(|(r, q)| q.crossings(r, now))
+            .collect()
+    }
+
+    /// See [`Live::set_quota`]; the report is checked first ([`Quota::check`]). The holders hear what is at or
+    /// past a level with their next heartbeat.
+    pub fn report_quota(
+        &mut self,
+        resource: ResourceId,
+        quota: Option<Quota>,
+    ) -> Result<(), LeaseError> {
+        if resource.index() >= self.live.model().resources().len() {
+            return Err(ModelError::BadId {
+                what: "resource",
+                id: resource.0,
+            }
+            .into());
+        }
+        if let Some(q) = &quota {
+            q.check().map_err(LeaseError::Quota)?;
+        }
+        self.live.set_quota(resource, quota.clone());
+        self.log(Op::SetQuota { resource, quota });
+        Ok(())
     }
 
     /// The holder reports what its current step has used (`tokens`, `context`, any name its budgets count):
@@ -1050,6 +1095,7 @@ impl Authority {
             Op::SetNodeLabels { node, labels } => self.set_node_labels(node, labels)?,
             Op::SetNodePolicy { node, policy } => self.set_node_policy(node, policy)?,
             Op::SetCapacity { resource, capacity } => self.set_capacity(resource, capacity)?,
+            Op::SetQuota { resource, quota } => self.report_quota(resource, quota)?,
             Op::SetNodeUp { node, up } => self.set_node_up(node, up)?,
             Op::NodeLost { node, then } => self.node_lost(node, then).map(drop)?,
             Op::Cancel { job } => self.cancel(job)?,
@@ -1229,6 +1275,7 @@ mod tests {
                 give_way: false,
                 over: vec![],
                 wakes: vec![],
+                quota: vec![],
             }
         );
         auth.set_now(at(49)).unwrap();

@@ -74,7 +74,9 @@ impl From<LeaseError> for Refusal {
             LeaseError::Stale(_) => Refusal::StaleLease(e.to_string()),
             LeaseError::Expired { .. } => Refusal::ExpiredLease(e.to_string()),
             LeaseError::NotHeld { .. } => Refusal::Conflict(e.to_string()),
-            LeaseError::Settings(_) | LeaseError::Model(_) => Refusal::Invalid(e.to_string()),
+            LeaseError::Settings(_) | LeaseError::Model(_) | LeaseError::Quota(_) => {
+                Refusal::Invalid(e.to_string())
+            }
             LeaseError::State(_) => Refusal::Conflict(e.to_string()),
             LeaseError::PairLoop { .. } => Refusal::Loop(e.to_string()),
         }
@@ -620,7 +622,7 @@ impl Service {
                 Some(rid) => rid,
             };
             let st = self.auth.live().state();
-            if st.capacity(self.auth.live().model(), rid) != free || st.measured(rid).is_none() {
+            if st.measured(rid) != Some(free) {
                 self.auth.set_capacity(rid, Some(free))?;
             }
         }
@@ -1534,6 +1536,34 @@ impl Service {
                     "every node that could take its {} is down",
                     need_kind(*need)
                 )
+            }
+            WaitReason::Quota {
+                resource,
+                window,
+                used,
+                limit,
+                reopens,
+                ..
+            } => {
+                let res = model.resource(*resource);
+                v.resource = Some(res.name.clone());
+                v.kind = Some(model.kind(res.kind).name.clone());
+                v.at = *reopens;
+                let share = if *limit == 100 {
+                    format!("{used}%")
+                } else {
+                    format!("{used} of {limit}")
+                };
+                let mut t = format!(
+                    "waits for a {}: {} has used {share} of its {window} quota",
+                    model.kind(res.kind).name,
+                    res.name
+                );
+                match reopens {
+                    Some(r) => t.push_str(&format!(", refills in {}", (*r - now).max(Dur::ZERO))),
+                    None => t.push_str(", no refill known"),
+                }
+                t
             }
             WaitReason::SameNode { tag } => {
                 format!("no node has room now for all its needs tagged {tag:?}")
