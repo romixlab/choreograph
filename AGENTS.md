@@ -85,6 +85,8 @@ Cargo workspace, edition 2024, one shared version.
   one, and pick features that avoid them.
 - **Public wording** in everything in the repo: code, docs, commit messages, CHANGELOG. No internal names, no
   design or review notes (those live outside the repo); a docs page explains the feature as it is.
+- **CLI look and behaviour** (help, completion, output, colour, errors and exit codes, progress, prompts,
+  --version): follow the CLI UX guide, `~/git/tpm/area/ops/cli-ux.md`; the rules above win where they are stricter.
 
 ## Tests
 
