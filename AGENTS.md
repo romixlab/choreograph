@@ -86,7 +86,11 @@ Cargo workspace, edition 2024, one shared version.
 - **Public wording** in everything in the repo: code, docs, commit messages, CHANGELOG. No internal names, no
   design or review notes (those live outside the repo); a docs page explains the feature as it is.
 - **CLI look and behaviour** (help, completion, output, colour, errors and exit codes, progress, prompts,
-  --version): follow the CLI UX guide, `~/git/tpm/area/ops/cli-ux.md`; the rules above win where they are stricter.
+  --version): follow the CLI UX guide, `~/git/vhrd_cli/docs/ux-guide.md`
+  (https://github.com/vhrdtech/vhrd_cli/blob/main/docs/ux-guide.md); the rules every UI shares are vhrd_egui's
+  guide section 2, "rules for every UI"
+  (https://github.com/vhrdtech/vhrd_egui/blob/main/docs/ux-guide.md#2-rules-for-every-ui). The rules above win
+  where they are stricter.
 
 ## Tests
 
