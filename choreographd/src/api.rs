@@ -105,6 +105,10 @@ pub struct SubmitJob {
         skip_serializing_if = "Option::is_none"
     )]
     pub start_anyway_after: Option<Dur>,
+    /// The kinds it would like free on its node, holding none (a build: `cores`): among the nodes where it fits,
+    /// the most free of these first. A preference only, it never holds the job back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefer: Vec<String>,
 }
 
 /// A budget on a job's lease (see [`choreograph::budget`]): the holder hears when it crosses a level.
@@ -175,6 +179,10 @@ pub struct NeedSpec {
     /// Policy labels it accepts on a node without asking for them (`builds = "false"`).
     #[serde(default, skip_serializing_if = "Labels::is_empty")]
     pub tolerate: Labels,
+    /// Only on one of these nodes. A name no node has reported counts as a node that takes nothing, and a list
+    /// with no such node is refused like any need no resource could ever give.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub among: Option<Vec<String>>,
     /// Needs with the same tag land on one node (a build's RAM and cores).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub same_node: Option<String>,
@@ -416,6 +424,10 @@ pub struct NodeReport {
     /// reported before and leaves out now has no room.
     #[serde(default)]
     pub room: BTreeMap<String, u64>,
+    /// How much of its room per kind it keeps from jobs placed here from elsewhere (a desk's reserve): a job
+    /// pinned to this node may use it, any other leaves it free. A kind it leaves out keeps nothing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub keep: BTreeMap<String, u64>,
     /// The jobs it runs under its standing instruction, without a lease: counted as used on this node (taken
     /// off its room) until a report leaves them out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -462,6 +474,9 @@ pub struct ResourceView {
     /// Held by jobs its node runs under its standing instruction, already taken off `capacity`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub local: u64,
+    /// Kept free from jobs placed here from elsewhere ([`NodeReport::keep`]).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub keep: u64,
     /// The jobs holding it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub holders: Vec<JobRef>,

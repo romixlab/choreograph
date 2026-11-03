@@ -541,6 +541,7 @@ impl ListScheduler {
             };
             (
                 spans,
+                std::cmp::Reverse(prefer_free(model, j, a, free)),
                 self.assignment_score(model, j, a, free),
                 a.resources.clone(),
             )
@@ -822,6 +823,26 @@ fn set_waits(plan: &mut Plan, members: &[JobId], who: JobId, why: WaitReason) {
 fn total(model: &Model, j: JobId, q: Quantile) -> Dur {
     let p = &model.job(j).phases;
     Phase::ALL.iter().map(|ph| q.of(p.get(*ph))).sum()
+}
+
+/// What the nodes of an assignment have free of the kinds its job prefers ([`Job::prefer`]): more is better.
+fn prefer_free(model: &Model, j: JobId, a: &Assignment, free: &[u64]) -> u64 {
+    let prefer = &model.job(j).prefer;
+    if prefer.is_empty() {
+        return 0;
+    }
+    let nodes: BTreeSet<NodeId> = a
+        .resources
+        .iter()
+        .map(|r| model.resource(*r).node)
+        .collect();
+    model
+        .resource_ids()
+        .filter(|r| {
+            let res = model.resource(*r);
+            prefer.contains(&res.kind) && nodes.contains(&res.node)
+        })
+        .fold(0, |sum: u64, r| sum.saturating_add(free[r.index()]))
 }
 
 /// How long a start holds its resources in a plan: at least 1 ms, so a zero estimate still occupies an instant.
@@ -1272,6 +1293,106 @@ mod tests {
         let p = ls.plan(&m, &s);
         assert_eq!(started(&p), vec![x, y]);
         s.start(&m, &p.batch()).unwrap();
+    }
+
+    /// Two nodes where a build fits: the tighter hole by the policy, the one with more idle cores by its
+    /// preference, also when that one has less RAM; and no idle cores keep nothing off a node.
+    #[test]
+    fn a_preferred_kind_orders_the_nodes_and_never_holds_a_job_back() {
+        let mut b = ModelBuilder::new();
+        let ram = b.kind("ram", Unit::Count);
+        let cores = b.kind("cores", Unit::Count);
+        let na = b.node("a", Labels::new());
+        let nb = b.node("b", Labels::new());
+        let a_ram = b.pool("a-ram", ram, na, 16);
+        let b_ram = b.pool("b-ram", ram, nb, 32);
+        b.pool("a-cores", cores, na, 8);
+        b.pool("b-cores", cores, nb, 8);
+        let plain = b.job(Job::new("plain").needs(ram, 12));
+        let mut soft = Job::new("soft").needs(ram, 12);
+        soft.prefer = vec![cores];
+        let soft = b.job(soft);
+        let m = b.build().unwrap();
+        let s = with(Policy::default());
+        assert_eq!(
+            s.choose(&m, plain, &[16, 32, 2, 8]).unwrap().resources,
+            vec![a_ram]
+        );
+        assert_eq!(
+            s.choose(&m, soft, &[16, 32, 2, 8]).unwrap().resources,
+            vec![b_ram]
+        );
+        assert_eq!(
+            s.choose(&m, soft, &[16, 32, 8, 2]).unwrap().resources,
+            vec![a_ram]
+        );
+        // RAM stays the hard limit: the idle node without the RAM takes nothing, the busy one still does
+        assert_eq!(
+            s.choose(&m, soft, &[4, 32, 8, 0]).unwrap().resources,
+            vec![b_ram]
+        );
+        assert_eq!(s.choose(&m, soft, &[4, 4, 8, 8]), None);
+    }
+
+    #[test]
+    fn among_names_the_nodes_a_need_may_land_on() {
+        let mut b = ModelBuilder::new();
+        let ram = b.kind("ram", Unit::Count);
+        let na = b.node("a", Labels::new());
+        let nb = b.node("b", Labels::new());
+        b.pool("a-ram", ram, na, 16);
+        let b_ram = b.pool("b-ram", ram, nb, 32);
+        let mut only_b = Job::new("only-b").needs(ram, 12);
+        only_b.needs[0].select.among = Some(vec![nb]);
+        let only_b = b.job(only_b);
+        let m = b.build().unwrap();
+        let s = with(Policy::default());
+        let mut nowhere = m.job(only_b).needs[0].clone();
+        nowhere.select.among = Some(vec![]);
+        assert!(m.candidates(&nowhere).is_empty());
+        assert_eq!(
+            s.choose(&m, only_b, &[16, 32]).unwrap().resources,
+            vec![b_ram]
+        );
+        assert_eq!(s.choose(&m, only_b, &[16, 4]), None);
+    }
+
+    /// A desk keeps its reserve from a job placed there from elsewhere; its own pinned job may use it all.
+    #[test]
+    fn a_kept_amount_holds_for_placed_jobs_not_for_pinned_ones() {
+        let mut b = ModelBuilder::new();
+        let ram = b.kind("ram", Unit::Count);
+        let na = b.node("a", Labels::new());
+        let nb = b.node("b", Labels::new());
+        let a_ram = b.pool("a-ram", ram, na, 32);
+        let b_ram = b.pool("b-ram", ram, nb, 32);
+        let placed = b.job(Job::new("placed").needs(ram, 12));
+        let mut pinned = Job::new("pinned").needs(ram, 12);
+        pinned.needs[0].select.node = Some(na);
+        let pinned = b.job(pinned);
+        let mut m = b.build().unwrap();
+        m.set_keep(a_ram, 8);
+        let s = with(Policy::default());
+        // a has 16 free, 8 of it kept: 8 is too little, b has room
+        assert_eq!(
+            s.choose(&m, placed, &[16, 28]).unwrap().resources,
+            vec![b_ram]
+        );
+        // past the keep the tighter hole is a again
+        assert_eq!(
+            s.choose(&m, placed, &[21, 28]).unwrap().resources,
+            vec![a_ram]
+        );
+        assert_eq!(
+            s.choose(&m, pinned, &[16, 28]).unwrap().resources,
+            vec![a_ram]
+        );
+        assert_eq!(m.free_for(&m.job(placed).needs[0], a_ram, 5), 0);
+        m.set_keep(a_ram, 0);
+        assert_eq!(
+            s.choose(&m, placed, &[16, 28]).unwrap().resources,
+            vec![a_ram]
+        );
     }
 
     #[test]

@@ -145,7 +145,7 @@ pub fn find_shaped(
             let mut c: Vec<ResourceId> = model
                 .candidates(n)
                 .into_iter()
-                .filter(|r| free[r.index()] >= n.amount)
+                .filter(|r| model.free_for(n, *r, free[r.index()]) >= n.amount)
                 .collect();
             c.sort_by_key(|r| (rank(i, *r), *r));
             c
@@ -211,7 +211,7 @@ fn search<'m>(
     }
     let need = &needs[i];
     for &r in &cands[i] {
-        if free[r.index()] < need.amount {
+        if model.free_for(need, r, free[r.index()]) < need.amount {
             continue;
         }
         let node = model.resource(r).node;
@@ -251,7 +251,10 @@ pub fn capacity_reason(model: &Model, state: &State, j: JobId, free: &[u64]) -> 
         if cands.is_empty() {
             return WaitReason::NoMatch { need: i };
         }
-        if cands.iter().any(|r| free[r.index()] >= need.amount) {
+        if cands
+            .iter()
+            .any(|r| model.free_for(need, *r, free[r.index()]) >= need.amount)
+        {
             continue;
         }
         if cands
@@ -279,7 +282,11 @@ pub fn capacity_reason(model: &Model, state: &State, j: JobId, free: &[u64]) -> 
             need: i,
             kind: need.kind,
             amount: need.amount,
-            most_free: cands.iter().map(|r| free[r.index()]).max().unwrap_or(0),
+            most_free: cands
+                .iter()
+                .map(|r| model.free_for(need, *r, free[r.index()]))
+                .max()
+                .unwrap_or(0),
         };
     }
     // Every need fits on its own: the same_node tags are what fails.

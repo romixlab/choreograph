@@ -162,6 +162,10 @@ pub struct Selector {
     /// node that has them, or on any other.
     #[serde(default, skip_serializing_if = "Labels::is_empty")]
     pub tolerate: Labels,
+    /// Only resources on one of these nodes (the caller's own list of who may take it, which labels can't say:
+    /// nodes it is allowed on, nodes a bench's fixture fits). `None`: any node; an empty list: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub among: Option<Vec<NodeId>>,
 }
 
 /// One thing a job needs: an amount of one resource of a kind, picked by a selector.
@@ -313,6 +317,11 @@ pub struct Job {
     /// `None`: it waits for room.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_anyway_after: Option<Dur>,
+    /// The kinds whose free amount it would like on its node, without holding any (a build wants idle cores, a
+    /// soak a quiet supply): among the nodes where it fits, the most free of these first, before the placement
+    /// policy's score. A preference only: a node with none of it still takes the job. Empty: the policy alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefer: Vec<KindId>,
 }
 
 impl Job {
@@ -369,9 +378,28 @@ pub struct Model {
     resources: Vec<Resource>,
     jobs: Vec<Job>,
     groups: Vec<Group>,
+    /// What each resource keeps free from jobs placed there from elsewhere (see [`Model::keep`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    keeps: BTreeMap<ResourceId, u64>,
 }
 
 impl Model {
+    /// How much of `r` is kept free from a need that does not name its node or resource: a person's bench or
+    /// desk keeps this much for its own work, while a job pinned there may use all of it.
+    pub fn keep(&self, r: ResourceId) -> u64 {
+        self.keeps.get(&r).copied().unwrap_or(0)
+    }
+
+    /// The free amount of `r` a need may take, of `free` free now: all of it for a need pinned there, the rest
+    /// after [`Model::keep`] for any other.
+    pub fn free_for(&self, need: &Need, r: ResourceId, free: u64) -> u64 {
+        if need.select.node.is_some() || need.select.resource.is_some() {
+            free
+        } else {
+            free.saturating_sub(self.keep(r))
+        }
+    }
+
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
@@ -445,6 +473,7 @@ impl Model {
             && res.capacity >= need.amount
             && sel.resource.is_none_or(|x| x == r)
             && sel.node.is_none_or(|n| n == res.node)
+            && sel.among.as_ref().is_none_or(|a| a.contains(&res.node))
             && sel.labels.iter().all(|(k, v)| res.labels.get(k) == Some(v))
             && sel
                 .node_labels
@@ -549,6 +578,19 @@ impl Model {
 
     pub(crate) fn set_node_policy(&mut self, n: NodeId, policy: Labels) {
         self.nodes[n.index()].policy = policy;
+    }
+
+    pub(crate) fn raise_capacity(&mut self, r: ResourceId, capacity: u64) {
+        let res = &mut self.resources[r.index()];
+        res.capacity = res.capacity.max(capacity);
+    }
+
+    pub(crate) fn set_keep(&mut self, r: ResourceId, keep: u64) {
+        if keep == 0 {
+            self.keeps.remove(&r);
+        } else {
+            self.keeps.insert(r, keep);
+        }
     }
 
     /// Adds jobs, as one group named `group` when given (their `group` fields are set to it). The jobs may come
@@ -790,6 +832,7 @@ impl ModelBuilder {
             resources: self.resources,
             jobs: self.jobs,
             groups: self.groups,
+            keeps: BTreeMap::new(),
         };
         validate(&m)?;
         Ok(m)
@@ -1052,6 +1095,7 @@ impl Job {
             budgets: Vec::new(),
             shapes: Vec::new(),
             start_anyway_after: None,
+            prefer: Vec::new(),
         }
     }
 

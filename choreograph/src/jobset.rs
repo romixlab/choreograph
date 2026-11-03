@@ -50,6 +50,7 @@
 //! run = { p50 = "1h", p90 = "3h" }
 //! preempt = "ask"                      # never (default), at_phase_boundary, ask
 //! pause_keeps = ["supply"]             # kinds a pause keeps; the rest is given back
+//! prefer = ["cores"]                   # kinds it would like free on its node, holding none; a need's `among` lists its nodes
 //! budgets = [{ name = "wall", meter = "wall", soft = 7200000, hard = 14400000 }]  # see choreograph::budget
 //! needs = [{ kind = "supply" }]
 //! ```
@@ -169,6 +170,7 @@ struct NeedT {
     node_labels: Labels,
     #[serde(default)]
     tolerate: Labels,
+    among: Option<Vec<String>>,
     state: Option<String>,
     same_node: Option<String>,
 }
@@ -216,6 +218,8 @@ struct JobT {
     #[serde(default)]
     shapes: Vec<Vec<NeedT>>,
     start_anyway_after: Option<String>,
+    #[serde(default)]
+    prefer: Vec<String>,
 }
 
 /// Parses a job set from TOML text into a validated [`Model`].
@@ -327,6 +331,20 @@ pub fn from_toml(text: &str) -> Result<Model, JobSetError> {
                         .ok_or_else(|| unknown(&ctx, "node", x))
                 })
                 .transpose()?;
+            let among = n
+                .among
+                .as_ref()
+                .map(|a| {
+                    a.iter()
+                        .map(|x| {
+                            nodes
+                                .get(x)
+                                .copied()
+                                .ok_or_else(|| unknown(&ctx, "node", x))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?;
             Ok(Need {
                 kind,
                 amount: match &n.amount {
@@ -339,6 +357,7 @@ pub fn from_toml(text: &str) -> Result<Model, JobSetError> {
                     labels: n.labels,
                     node_labels: n.node_labels,
                     tolerate: n.tolerate,
+                    among,
                 },
                 state: n.state,
                 same_node: n.same_node,
@@ -380,6 +399,15 @@ pub fn from_toml(text: &str) -> Result<Model, JobSetError> {
         if let Some(g) = &j.group {
             groups.entry(g.clone()).or_default().push(JobId(i as u32));
         }
+        let mut prefer = Vec::new();
+        for k in &j.prefer {
+            prefer.push(
+                kinds
+                    .get(k)
+                    .ok_or_else(|| unknown(&ctx, "kind (prefer)", k))?
+                    .0,
+            );
+        }
         let mut pause_keeps = Vec::new();
         for k in &j.pause_keeps {
             pause_keeps.push(
@@ -420,6 +448,7 @@ pub fn from_toml(text: &str) -> Result<Model, JobSetError> {
                 .as_deref()
                 .map(|d| dur(d, &ctx))
                 .transpose()?,
+            prefer,
         });
     }
     for (name, members) in groups {

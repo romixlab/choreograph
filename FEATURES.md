@@ -61,6 +61,9 @@ or reused. Status: ✅ done, 🚧 partial, 📋 planned, 🐛 bug, ❌ dropped.
   the shape a moldable job got, a start over capacity and when a queued job starts anyway. Tests:
   `choreographd/tests/e2e.rs` (`a_pinned_build_starts_anyway_past_its_wait_over_capacity`,
   `a_moldable_job_gets_the_largest_shape_that_fits`).
+- 🧪 **CORE-10 prefer-free-kinds**: a soft score: `Job::prefer` names kinds a job would like free on its node without holding any (`SubmitJob::prefer`, `prefer` in a job set). Among the assignments that fit, the planner takes the node with the most free of these first, before `Policy::placement`'s score (`list.rs` `prefer_free`). It never holds a job back. Tests: `list.rs` `a_preferred_kind_...`, `choreographd/tests/e2e.rs` `a_placed_job_...`.
+- 🧪 **CORE-11 among-nodes**: `Selector::among` lists the nodes a need may land on, for a caller's own rules that labels can't say (`NeedSpec::among`, `among` in a job set). An empty list takes nothing, and a name that never reported counts as a node that takes nothing. Tests: `list.rs` `among_names_...`, `e2e.rs` `a_placed_job_...`.
+- 🧪 **CORE-12 node-keep**: a node keeps part of its room from jobs placed there from elsewhere (`NodeReport::keep`, `Model::keep`, `Model::free_for`, `Authority::set_keep`, journalled). A need that names its node or resource may use it; any other leaves it free, and the wait reason's free amount counts it. Fits a desk's reserve or a bench's person. Tests: `list.rs` `a_kept_amount_...`, `e2e.rs` `a_placed_job_...`.
 - 🚧 **CORE-9 quota-resources**: a resource whose use is limited by a quota that refills (a login's weekly
   cap and short window, an API key's rate limit, a bench's daily duty cycle), reported by a client as
   `Quota` windows (`quota.rs`: what is used, the limit, a soft level, the reset and an optional refill period);

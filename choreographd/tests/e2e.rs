@@ -602,6 +602,132 @@ async fn without_tokens_callers_name_themselves() {
     svc.stop().await;
 }
 
+/// Where a job that names no node lands: what a node keeps, a kind it prefers and the nodes it lists.
+#[tokio::test(start_paused = true)]
+async fn a_placed_job_reads_labels_among_keep_and_prefer() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = Svc::open(config(dir.path(), ""));
+    let (one, two) = (svc.client("node-1"), svc.client("node-2"));
+    let a = svc.client("a");
+    let report = |ram: u64, keep: u64, gate: u64| {
+        let mut r = NodeReport {
+            up: true,
+            ..Default::default()
+        };
+        r.room.insert("ram".into(), ram);
+        r.room.insert("gate".into(), gate);
+        if keep > 0 {
+            r.keep.insert("ram".into(), keep);
+        }
+        r
+    };
+    // node-1 the tighter hole, 8 of its 16 kept; node-2 has 32
+    one.report("node-1", &report(16, 8, 1)).await.unwrap();
+    two.report("node-2", &report(32, 0, 4)).await.unwrap();
+    let need = |amount: u64, among: Option<Vec<String>>| NeedSpec {
+        kind: "ram".into(),
+        amount,
+        among,
+        ..Default::default()
+    };
+    let job = |name: &str, needs: Vec<NeedSpec>, prefer: Vec<String>| SubmitJob {
+        name: name.into(),
+        needs,
+        prefer,
+        ..Default::default()
+    };
+    let on = |v: &choreographd::api::JobView| {
+        v.lease
+            .as_ref()
+            .and_then(|l| l.held.first())
+            .map(|h| h.node.clone())
+    };
+    // past what node-1 keeps: node-2, though node-1 is the tighter hole
+    let v = a
+        .submit(&job("big", vec![need(12, None)], vec![]))
+        .await
+        .unwrap();
+    assert_eq!(on(&v).as_deref(), Some("node-2"));
+    a.release(v.lease.as_ref().unwrap().token, Outcome::Cancelled)
+        .await
+        .unwrap();
+    // within what it does not keep: the tighter hole
+    let v = a
+        .submit(&job("small", vec![need(6, None)], vec![]))
+        .await
+        .unwrap();
+    assert_eq!(on(&v).as_deref(), Some("node-1"));
+    a.release(v.lease.as_ref().unwrap().token, Outcome::Cancelled)
+        .await
+        .unwrap();
+    // the kind it prefers turns that around; among turns it back
+    let v = a
+        .submit(&job("soft", vec![need(6, None)], vec!["gate".into()]))
+        .await
+        .unwrap();
+    assert_eq!(on(&v).as_deref(), Some("node-2"));
+    a.release(v.lease.as_ref().unwrap().token, Outcome::Cancelled)
+        .await
+        .unwrap();
+    let v = a
+        .submit(&job(
+            "listed",
+            vec![need(6, Some(vec!["node-1".into(), "node-0".into()]))],
+            vec!["gate".into()],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(on(&v).as_deref(), Some("node-1"));
+    a.release(v.lease.as_ref().unwrap().token, Outcome::Cancelled)
+        .await
+        .unwrap();
+    // only nodes that never reported: no resource could ever give it, refused like any such need
+    assert!(
+        a.submit(&job(
+            "nowhere",
+            vec![need(6, Some(vec!["node-0".into()]))],
+            vec![],
+        ))
+        .await
+        .is_err()
+    );
+    // an unknown kind is refused, and what a node keeps shows in the queue view
+    assert!(
+        a.submit(&job("bad", vec![need(1, None)], vec!["nope".into()]))
+            .await
+            .is_err()
+    );
+    let q = a.queue().await.unwrap();
+    let kept = q.nodes.iter().find(|n| n.name == "node-1").unwrap();
+    assert_eq!(
+        kept.resources
+            .iter()
+            .find(|r| r.kind == "ram")
+            .unwrap()
+            .keep,
+        8
+    );
+    // and a report without it keeps nothing again
+    one.report("node-1", &report(16, 0, 1)).await.unwrap();
+    let v = a
+        .submit(&job("big2", vec![need(12, None)], vec![]))
+        .await
+        .unwrap();
+    assert_eq!(on(&v).as_deref(), Some("node-1"));
+    a.release(v.lease.as_ref().unwrap().token, Outcome::Cancelled)
+        .await
+        .unwrap();
+    // its room grew past what it first reported: a need is judged by the most it has given, not the first
+    two.report("node-2", &report(4, 0, 4)).await.unwrap();
+    one.report("node-1", &report(64, 0, 1)).await.unwrap();
+    let v = a
+        .submit(&job("bigger", vec![need(40, None)], vec![]))
+        .await
+        .unwrap();
+    assert_eq!(on(&v).as_deref(), Some("node-1"));
+    svc.stop().await;
+}
+
 /// A session on a bench: open-ended, held until released, paused to let a gate run on its slot, resumed on
 /// the same slot, asked to give way for a more important job, and its kind learns how long sessions last.
 #[tokio::test(start_paused = true)]

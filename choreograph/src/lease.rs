@@ -303,6 +303,10 @@ pub enum Op {
         node: NodeId,
         policy: Labels,
     },
+    SetKeep {
+        resource: ResourceId,
+        keep: u64,
+    },
     SetQuota {
         resource: ResourceId,
         quota: Option<Quota>,
@@ -964,6 +968,20 @@ impl Authority {
         Ok(())
     }
 
+    /// See [`Live::set_keep`].
+    pub fn set_keep(&mut self, resource: ResourceId, keep: u64) -> Result<(), LeaseError> {
+        if resource.index() >= self.live.model().resources().len() {
+            return Err(ModelError::BadId {
+                what: "resource",
+                id: resource.0,
+            }
+            .into());
+        }
+        self.live.set_keep(resource, keep);
+        self.log(Op::SetKeep { resource, keep });
+        Ok(())
+    }
+
     /// See [`Live::set_capacity`].
     pub fn set_capacity(
         &mut self,
@@ -1094,6 +1112,7 @@ impl Authority {
             Op::AddResource { resource } => self.add_resource(resource).map(drop)?,
             Op::SetNodeLabels { node, labels } => self.set_node_labels(node, labels)?,
             Op::SetNodePolicy { node, policy } => self.set_node_policy(node, policy)?,
+            Op::SetKeep { resource, keep } => self.set_keep(resource, keep)?,
             Op::SetCapacity { resource, capacity } => self.set_capacity(resource, capacity)?,
             Op::SetQuota { resource, quota } => self.report_quota(resource, quota)?,
             Op::SetNodeUp { node, up } => self.set_node_up(node, up)?,

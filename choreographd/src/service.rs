@@ -560,6 +560,7 @@ impl Service {
         for k in r
             .room
             .keys()
+            .chain(r.keep.keys())
             .map(String::as_str)
             .chain(local.keys().copied())
         {
@@ -624,6 +625,10 @@ impl Service {
             let st = self.auth.live().state();
             if st.measured(rid) != Some(free) {
                 self.auth.set_capacity(rid, Some(free))?;
+            }
+            let keep = r.keep.get(&name).copied().unwrap_or(0);
+            if self.auth.live().model().keep(rid) != keep {
+                self.auth.set_keep(rid, keep)?;
             }
         }
         self.reported.insert(node.to_string(), now.max(self.now()));
@@ -1024,6 +1029,15 @@ impl Service {
             .map(Into::into)
             .collect();
         job.shapes = shapes;
+        for name in &req.prefer {
+            job.prefer.push(
+                self.auth
+                    .live()
+                    .model()
+                    .kind_by_name(name)
+                    .ok_or_else(|| Refusal::Invalid(format!("prefer: unknown kind {name:?}")))?,
+            );
+        }
         // Start anyway: the job's own wait where its kind allows one, else its kind's for a job pinned to a
         // node outside a group.
         job.start_anyway_after = match req.start_anyway_after {
@@ -1070,6 +1084,11 @@ impl Service {
                     .ok_or_else(|| Refusal::Invalid(format!("unknown node {name:?}")))?,
             ),
         };
+        let among = n.among.as_ref().map(|a| {
+            a.iter()
+                .filter_map(|name| model.node_by_name(name))
+                .collect()
+        });
         let resource = match &n.resource {
             None if shared => {
                 return Err(Refusal::Invalid(format!(
@@ -1099,6 +1118,7 @@ impl Service {
                 labels: n.labels,
                 node_labels: n.node_labels,
                 tolerate: n.tolerate,
+                among,
             },
             state: None,
             same_node: n.same_node,
@@ -1435,6 +1455,7 @@ impl Service {
                         name: res.name.clone(),
                         kind: model.kind(res.kind).name.clone(),
                         capacity: st.capacity(model, r),
+                        keep: model.keep(r),
                         used: st.used(r),
                         local: self.local.get(&node.name).map_or(0, |js| {
                             let k = &model.kind(res.kind).name;

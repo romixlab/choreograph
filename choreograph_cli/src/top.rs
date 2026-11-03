@@ -434,6 +434,7 @@ mod tests {
                 capacity: 2,
                 used: 1,
                 local: 0,
+                keep: 0,
                 holders: vec![1],
             }],
             local: vec![],

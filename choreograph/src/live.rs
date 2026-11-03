@@ -268,6 +268,11 @@ impl Live {
         self.model.set_node_policy(n, policy);
     }
 
+    /// Sets what `r` keeps free from jobs placed there from elsewhere (see [`Model::keep`]). Running jobs stay.
+    pub fn set_keep(&mut self, r: ResourceId, keep: u64) {
+        self.model.set_keep(r, keep);
+    }
+
     /// See [`State::set_quota`].
     pub fn set_quota(&mut self, r: ResourceId, quota: Option<Quota>) {
         self.state.set_quota(r, quota);
@@ -275,6 +280,10 @@ impl Live {
 
     /// See [`State::set_capacity`].
     pub fn set_capacity(&mut self, r: ResourceId, capacity: Option<u64>) {
+        // what it has given is what it could ever give: a need is judged against the most seen, not the first
+        if let Some(c) = capacity {
+            self.model.raise_capacity(r, c);
+        }
         self.state.set_capacity(r, capacity);
         if self.observed() {
             self.emit(Event::Capacity {
