@@ -86,17 +86,14 @@ Cargo workspace, edition 2024, one shared version.
 - **Public wording** in everything in the repo: code, docs, commit messages, CHANGELOG. No internal names, no
   design or review notes (those live outside the repo); a docs page explains the feature as it is.
 - **CLI look and behaviour** (help, completion, output, colour, errors and exit codes, progress, prompts,
-  --version): follow the CLI UX guide, `~/git/vhrd_cli/docs/ux-guide.md`
-  (https://github.com/vhrdtech/vhrd_cli/blob/main/docs/ux-guide.md); the rules every UI shares are vhrd_egui's
-  guide section 2, "rules for every UI"
-  (https://github.com/vhrdtech/vhrd_egui/blob/main/docs/ux-guide.md#2-rules-for-every-ui). The rules above win
-  where they are stricter.
+  --version): follow our shared CLI UX guidelines, including the rules every UI (CLI or egui-based) follows in
+  common. The rules above win where they are stricter.
 
 ## Tests
 
 - `just test` runs the whole suite with `cargo nextest` (plus doctests); `just test --changed` only the crates
-  changed against main and their dependents (needs `tpm` on PATH). `just lint` runs clippy with `-D warnings`
-  and `cargo fmt --check`.
+  changed against main and their dependents (needs our internal change-detection tool on PATH). `just lint` runs
+  clippy with `-D warnings` and `cargo fmt --check`.
 - Tests are deterministic: no real time decides an outcome, no sleeps, seeded randomness only, concurrent things
   asserted as sets. A flaky test is a bug fixed at its cause.
 - Property tests (`proptest`) for invariants: no resource over capacity, cleanup always runs, progress while
@@ -107,9 +104,9 @@ Cargo workspace, edition 2024, one shared version.
 
 - `just` lists the recipes; `just test`, `just lint`, `just install` (build and put `choreograph` and
   `choreographd` on PATH),
-  `just deploy` (bring this checkout up to main and install), `just dist OUT` (a static musl `choreographd` for
-  `tpm dist build` on a build node; the PC that runs the service pulls and installs it with `tpm dist pull
-  --install`, and root copies it into /usr/local/bin on `tpm provision approve`).
+  `just deploy` (bring this checkout up to main and install), `just dist OUT` (a static musl `choreographd`
+  bundle for deployment; the PC that runs the service pulls and installs it through our internal deploy
+  tooling, which copies it into /usr/local/bin on the admin's approval).
 - `choreograph --version` shows the version, the git SHA and the commit time.
 
 ## Commits

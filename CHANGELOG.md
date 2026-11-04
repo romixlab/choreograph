@@ -5,6 +5,10 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Changed
+
+- docs: internal references removed
+
 ## [0.10.0] - 2026-11-04
 
 ### Added
@@ -163,9 +167,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ### Added
 
-- `just dist OUT`: a static musl `choreographd` bundle for `tpm dist build` on a build node, so the PC that runs
-  the service (core-1, which builds nothing) gets it with `tpm dist pull choreograph --from BUILD --rev SHA
-  --install` and root's `tpm provision` upgrade step (tpm_cli PROV-72).
+- `just dist OUT`: a static musl `choreographd` bundle built for deployment, so the PC that runs the service
+  (which builds nothing) can pull and install it through our internal deploy tooling's upgrade step.
 
 ## [0.3.3] - 2026-10-26
 
