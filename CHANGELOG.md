@@ -5,6 +5,19 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-04
+
+### Added
+
+- **Breaking:** a client that sends `prefer`, `among` or `keep` needs a choreographd of this release: an older one refuses the unknown field. Deploy choreographd first.
+- A job may prefer kinds (`SubmitJob::prefer`, `Job::prefer`, `prefer = [...]` in a job set): among the nodes where it fits, the most free of these first, before the placement policy's score, holding none of them. It never holds the job back (CORE-10).
+- A need may list its nodes (`NeedSpec::among`, `Selector::among`, `among = [...]` in a job set), for what labels can't say. A name no node has reported takes nothing (CORE-11).
+- A node may keep part of its room from jobs placed there from elsewhere (`NodeReport::keep`, `ResourceView::keep`, `Model::keep`, journalled as `Op::SetKeep`): a need that names no node or resource leaves it free, a pinned one may use it, and the wait reason counts it (CORE-12).
+
+### Fixed
+
+- A need is judged against the most a resource has given, not its first report: a node whose first report was small could never take a larger job, whatever it reported later, and such a job was refused as "no resource could ever give" (CORE-3).
+
 ## [0.8.0] - 2026-11-04
 
 ### Added
