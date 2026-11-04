@@ -5,6 +5,8 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-04
+
 ### Added
 
 - **Breaking:** a client that sends `prefer_nodes` needs a choreographd of this release: an older one refuses the unknown field. Deploy choreographd first.
