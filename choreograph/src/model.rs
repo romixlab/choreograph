@@ -322,6 +322,12 @@ pub struct Job {
     /// policy's score. A preference only: a node with none of it still takes the job. Empty: the policy alone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefer: Vec<KindId>,
+    /// The nodes it would rather go to, best first: among the assignments as good by every other preference
+    /// (fewer nodes, [`Job::prefer`]'s free kinds), one on a node earlier in this list goes first, before the
+    /// placement policy's score. A tie-break only: it never holds the job back, and a node not listed still
+    /// takes it. Empty: no preference.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefer_nodes: Vec<NodeId>,
 }
 
 impl Job {
@@ -1096,6 +1102,7 @@ impl Job {
             shapes: Vec::new(),
             start_anyway_after: None,
             prefer: Vec::new(),
+            prefer_nodes: Vec::new(),
         }
     }
 

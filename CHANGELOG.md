@@ -5,6 +5,11 @@ follow [Semantic Versioning](https://semver.org/). Feature IDs refer to [FEATURE
 
 ## [Unreleased]
 
+### Added
+
+- **Breaking:** a client that sends `prefer_nodes` needs a choreographd of this release: an older one refuses the unknown field. Deploy choreographd first.
+- A job may name the nodes it would rather go to (`SubmitJob::prefer_nodes`, `Job::prefer_nodes`, `prefer_nodes = [...]` in a job set), best first: among the assignments as good by every other preference, one on an earlier node goes first, before the placement policy's score. A tie-break only: it never holds the job back. A name no node has reported is left out, not refused. Sent only when not empty (CORE-13).
+
 ## [0.9.0] - 2026-11-04
 
 ### Added

@@ -681,6 +681,18 @@ async fn a_placed_job_reads_labels_among_keep_and_prefer() {
     a.release(v.lease.as_ref().unwrap().token, Outcome::Cancelled)
         .await
         .unwrap();
+    // a preferred node breaks the tie over the tighter hole; one that never reported is left out, not refused
+    let v = a
+        .submit(&SubmitJob {
+            prefer_nodes: vec!["node-0".into(), "node-2".into()],
+            ..job("preferred", vec![need(6, None)], vec![])
+        })
+        .await
+        .unwrap();
+    assert_eq!(on(&v).as_deref(), Some("node-2"));
+    a.release(v.lease.as_ref().unwrap().token, Outcome::Cancelled)
+        .await
+        .unwrap();
     // only nodes that never reported: no resource could ever give it, refused like any such need
     assert!(
         a.submit(&job(

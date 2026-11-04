@@ -109,6 +109,11 @@ pub struct SubmitJob {
     /// the most free of these first. A preference only, it never holds the job back.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefer: Vec<String>,
+    /// The nodes it would rather go to, best first (a landing's usual gate node): among the nodes where it fits
+    /// and that are as good by `prefer`, an earlier one first. A tie-break only, it never holds the job back; a
+    /// name no node has reported is left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefer_nodes: Vec<String>,
 }
 
 /// A budget on a job's lease (see [`choreograph::budget`]): the holder hears when it crosses a level.

@@ -51,6 +51,7 @@
 //! preempt = "ask"                      # never (default), at_phase_boundary, ask
 //! pause_keeps = ["supply"]             # kinds a pause keeps; the rest is given back
 //! prefer = ["cores"]                   # kinds it would like free on its node, holding none; a need's `among` lists its nodes
+//! prefer_nodes = ["build-1"]           # nodes it would rather go to, best first: a tie-break after `prefer`
 //! budgets = [{ name = "wall", meter = "wall", soft = 7200000, hard = 14400000 }]  # see choreograph::budget
 //! needs = [{ kind = "supply" }]
 //! ```
@@ -220,6 +221,8 @@ struct JobT {
     start_anyway_after: Option<String>,
     #[serde(default)]
     prefer: Vec<String>,
+    #[serde(default)]
+    prefer_nodes: Vec<String>,
 }
 
 /// Parses a job set from TOML text into a validated [`Model`].
@@ -408,6 +411,16 @@ pub fn from_toml(text: &str) -> Result<Model, JobSetError> {
                     .0,
             );
         }
+        let prefer_nodes = j
+            .prefer_nodes
+            .iter()
+            .map(|x| {
+                nodes
+                    .get(x)
+                    .copied()
+                    .ok_or_else(|| unknown(&ctx, "node (prefer_nodes)", x))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut pause_keeps = Vec::new();
         for k in &j.pause_keeps {
             pause_keeps.push(
@@ -449,6 +462,7 @@ pub fn from_toml(text: &str) -> Result<Model, JobSetError> {
                 .map(|d| dur(d, &ctx))
                 .transpose()?,
             prefer,
+            prefer_nodes,
         });
     }
     for (name, members) in groups {

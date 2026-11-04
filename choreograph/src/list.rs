@@ -542,6 +542,7 @@ impl ListScheduler {
             (
                 spans,
                 std::cmp::Reverse(prefer_free(model, j, a, free)),
+                node_rank(model, j, a),
                 self.assignment_score(model, j, a, free),
                 a.resources.clone(),
             )
@@ -843,6 +844,17 @@ fn prefer_free(model: &Model, j: JobId, a: &Assignment, free: &[u64]) -> u64 {
             prefer.contains(&res.kind) && nodes.contains(&res.node)
         })
         .fold(0, |sum: u64, r| sum.saturating_add(free[r.index()]))
+}
+
+/// Where the nodes of an assignment come in its job's preferred nodes ([`Job::prefer_nodes`]): the earliest
+/// one's place, the list's length for none listed. Lower is better; 0 for all without a list.
+fn node_rank(model: &Model, j: JobId, a: &Assignment) -> usize {
+    let prefer = &model.job(j).prefer_nodes;
+    a.resources
+        .iter()
+        .filter_map(|r| prefer.iter().position(|n| *n == model.resource(*r).node))
+        .min()
+        .unwrap_or(prefer.len())
 }
 
 /// How long a start holds its resources in a plan: at least 1 ms, so a zero estimate still occupies an instant.
@@ -1332,6 +1344,43 @@ mod tests {
             vec![b_ram]
         );
         assert_eq!(s.choose(&m, soft, &[4, 4, 8, 8]), None);
+    }
+
+    /// A preferred node breaks a tie: as good by the job's preferred kinds, the listed node goes first, also
+    /// over the policy's tighter hole; more idle cores elsewhere still win, and a full preferred node takes
+    /// nothing.
+    #[test]
+    fn a_preferred_node_breaks_ties_and_never_holds_a_job_back() {
+        let mut b = ModelBuilder::new();
+        let ram = b.kind("ram", Unit::Count);
+        let cores = b.kind("cores", Unit::Count);
+        let na = b.node("a", Labels::new());
+        let nb = b.node("b", Labels::new());
+        let a_ram = b.pool("a-ram", ram, na, 16);
+        let b_ram = b.pool("b-ram", ram, nb, 32);
+        b.pool("a-cores", cores, na, 8);
+        b.pool("b-cores", cores, nb, 8);
+        let mut to_b = Job::new("to-b").needs(ram, 12);
+        to_b.prefer = vec![cores];
+        to_b.prefer_nodes = vec![nb];
+        let to_b = b.job(to_b);
+        let m = b.build().unwrap();
+        let s = with(Policy::default());
+        // equal idle cores: best fit would take a, the preference takes b
+        assert_eq!(
+            s.choose(&m, to_b, &[16, 32, 8, 8]).unwrap().resources,
+            vec![b_ram]
+        );
+        // more idle cores on a: the preferred kind comes first
+        assert_eq!(
+            s.choose(&m, to_b, &[16, 32, 8, 2]).unwrap().resources,
+            vec![a_ram]
+        );
+        // b has no room: a takes it
+        assert_eq!(
+            s.choose(&m, to_b, &[16, 4, 8, 8]).unwrap().resources,
+            vec![a_ram]
+        );
     }
 
     #[test]

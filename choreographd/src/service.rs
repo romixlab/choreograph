@@ -1038,6 +1038,12 @@ impl Service {
                     .ok_or_else(|| Refusal::Invalid(format!("prefer: unknown kind {name:?}")))?,
             );
         }
+        // a node not reported yet is no reason to refuse: it may report later, the job goes elsewhere meanwhile
+        job.prefer_nodes = req
+            .prefer_nodes
+            .iter()
+            .filter_map(|name| self.auth.live().model().node_by_name(name))
+            .collect();
         // Start anyway: the job's own wait where its kind allows one, else its kind's for a job pinned to a
         // node outside a group.
         job.start_anyway_after = match req.start_anyway_after {
